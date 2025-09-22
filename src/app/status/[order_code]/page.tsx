@@ -65,6 +65,7 @@ export default function StatusPage({ params }: { params: Promise<{ order_code: s
 
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [closedAt, setClosedAt] = useState<string | null>(null);
+  const [tableNumber, setTableNumber] = useState<number | null>(null);
   const [customerConfirmedAt, setCustomerConfirmedAt] = useState<string | null>(null);
 
   const [resolutionRequired, setResolutionRequired] = useState<boolean>(false);
@@ -96,6 +97,7 @@ export default function StatusPage({ params }: { params: Promise<{ order_code: s
       if (!pausePolling && !hasAnyIssueOpenRef.current) {
         setTickets(j.tickets ?? []);
         setClosedAt(j.closed_at ?? null);
+        setTableNumber(j.table_number ?? null);
         setCustomerConfirmedAt((j as any).customer_confirmed_at ?? null);
 
         const rr = Boolean((j as any).resolution_required);
@@ -348,7 +350,14 @@ export default function StatusPage({ params }: { params: Promise<{ order_code: s
   return (
     <main className="mx-auto max-w-3xl px-4 py-6">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Order {order_code}</h1>
+        <div className="mb-4 flex items-center justify-between">
+  <h1 className="text-2xl font-bold">Order {order_code}</h1>
+  {tableNumber != null && (
+    <div className="rounded-full border px-3 py-1 text-sm">
+      Table <span className="font-semibold">{tableNumber}</span>
+    </div>
+  )}
+</div>
         {/* Always-available "Back to Menu" */}
         <a
           href={`/menu?oc=${encodeURIComponent(order_code)}`}

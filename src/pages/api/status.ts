@@ -28,10 +28,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       { auth: { persistSession: false } }
     );
 
-    // 1) Find order group
+    // 1) Find order group (⬅️ include table_number)
     const { data: og, error: ogErr } = await supa
       .from("order_groups")
-      .select("id, closed_at, customer_confirmed_at, resolution_required")
+      .select("id, table_number, closed_at, customer_confirmed_at, resolution_required")
       .eq("order_code", oc)
       .maybeSingle();
 
@@ -47,6 +47,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         resolution_required: false,
         has_runner_ack: false,
         issues: [] as IssueLite[],
+        table_number: null, // ⬅️ added for consistency
       });
     }
 
@@ -125,10 +126,11 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       ok: true,
       tickets,
       closed_at: (og as any).closed_at ?? null,
-      customer_confirmed_at: (og as any).customer_confirmed_at ?? null, // <-- added for delivered-confirm UX
+      customer_confirmed_at: (og as any).customer_confirmed_at ?? null,
       resolution_required,
       has_runner_ack,
       issues,
+      table_number: (og as any).table_number ?? null, // ⬅️ NEW: expose table number
     });
   } catch (e: any) {
     return res.status(500).json({ ok: false, error: e?.message || "Unexpected error" });

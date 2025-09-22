@@ -3,13 +3,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 
+type Stream = "food" | "drinks";
+
+type LineItem = { name: string; qty: number };
+
 type Ticket = {
   id: number;
   order_group_id: number;
-  stream: "food" | "drinks";
+  stream: Stream;
   status: "received" | "preparing" | "ready" | "delivered" | "completed" | "cancelled";
   created_at: string;
   order_groups?: { order_code: string; table_number: number | null } | null;
+  items?: LineItem[]; // ⬅️ NEW: items for this ticket
 };
 
 type Group = {
@@ -28,7 +33,7 @@ type IssueRow = {
   created_at: string;
   // joined
   order_groups?: { order_code: string; table_number: number | null } | null;
-  tickets?: { stream: "food" | "drinks" } | null;
+  tickets?: { stream: Stream } | null;
 };
 
 type IssueGroup = {
@@ -36,7 +41,7 @@ type IssueGroup = {
   table_number: number | null;
   issues: Array<{
     id: number;
-    stream: "food" | "drinks" | null;
+    stream: Stream | null;
     type: string | null;
     description: string | null;
     status: IssueRow["status"];
@@ -65,7 +70,7 @@ export default function RunnerPage() {
   async function load() {
     setErr(null);
 
-    // A) Ready tickets (to deliver)
+    // A) Ready tickets (to deliver) + join order group (code/table)
     const { data: ticketsData, error: tErr } = await supa
       .from("tickets")
       .select(
@@ -78,14 +83,41 @@ export default function RunnerPage() {
       setErr(tErr.message);
       setGroups([]);
     } else {
+      const list = (ticketsData || []) as Ticket[];
+
+      // ⬇️ NEW: fetch items for these tickets
+      const ids = list.map((t) => t.id);
+      const { data: itemsData, error: liErr } = await supa
+        .from("ticket_line_items")
+        .select("ticket_id, name, qty")
+        .in("ticket_id", ids.length ? ids : [-1]);
+
+      if (liErr) {
+        setErr(liErr.message);
+      }
+
+      // Map items by ticket id
+      const itemsByTicket = new Map<number, LineItem[]>();
+      (itemsData || []).forEach((row: any) => {
+        const tid = Number(row.ticket_id);
+        const arr = itemsByTicket.get(tid) ?? [];
+        arr.push({ name: String(row.name), qty: Number(row.qty) });
+        itemsByTicket.set(tid, arr);
+      });
+
+      // Group by order_code, attach items to each ticket
       const byOrder = new Map<string, Group>();
-      for (const t of (ticketsData || []) as Ticket[]) {
+      for (const t of list) {
         const oc = t.order_groups?.order_code || `OG-${t.order_group_id}`;
         const table = t.order_groups?.table_number ?? null;
+        const withItems: Ticket = { ...t, items: itemsByTicket.get(t.id) ?? [] };
         if (!byOrder.has(oc)) byOrder.set(oc, { order_code: oc, table_number: table, tickets: [] });
-        byOrder.get(oc)!.tickets.push(t);
+        byOrder.get(oc)!.tickets.push(withItems);
       }
+
       let all = Array.from(byOrder.values());
+
+      // Optional filter by order code / table #
       if (search.trim()) {
         const q = search.toLowerCase();
         all = all.filter((g) => {
@@ -94,6 +126,14 @@ export default function RunnerPage() {
           return codeHit || tableHit;
         });
       }
+
+      // Sort groups by earliest ticket created_at
+      all.sort((a, b) => {
+        const ta = a.tickets[0]?.created_at || "";
+        const tb = b.tickets[0]?.created_at || "";
+        return ta.localeCompare(tb);
+      });
+
       setGroups(all);
     }
 
@@ -159,15 +199,18 @@ export default function RunnerPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supa]);
 
-  async function deliver(ticketId: number) {
-    setBusyDeliver(ticketId);
+  // ⬇️ CHANGED: deliver by using order_code + stream (matches your API)
+  async function deliver(t: Ticket) {
+    setBusyDeliver(t.id);
     try {
-      const r = await fetch("/api/tickets/update-status", {
-        method: "POST",
+      const order_code = t.order_groups?.order_code || `OG-${t.order_group_id}`;
+      const res = await fetch("/api/tickets/update-status", {
+        method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ticket_id: ticketId, status: "delivered" }),
+        body: JSON.stringify({ order_code, stream: t.stream, next_status: "delivered" }),
       });
-      if (!r.ok) throw new Error(await r.text());
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) throw new Error(j.error || "Failed to update");
       setBanner("Delivered ✔");
       setTimeout(() => setBanner(null), 1500);
     } catch (e: any) {
@@ -253,19 +296,41 @@ export default function RunnerPage() {
               <div className="font-semibold">
                 Table {g.table_number ?? "—"} • <span className="font-mono">{g.order_code}</span>
               </div>
+
               <div className="mt-3 grid gap-2">
-                {g.tickets.map((t) => (
-                  <div key={t.id} className="flex items-center justify-between rounded-lg border px-3 py-2">
-                    <div className="text-sm">#{String(t.id).slice(-4)} • {t.stream}</div>
-                    <button
-                      onClick={() => deliver(t.id)}
-                      disabled={busyDeliver === t.id}
-                      className="rounded-lg border bg-black text-white text-sm px-3 py-2 hover:opacity-90 disabled:opacity-60"
-                    >
-                      {busyDeliver === t.id ? "Delivering…" : "Mark delivered"}
-                    </button>
-                  </div>
-                ))}
+                {g.tickets.map((t) => {
+                  const isBusy = busyDeliver === t.id;
+                  return (
+                    <div key={t.id} className="rounded-lg border">
+                      <div className="flex items-center justify-between px-3 py-2">
+                        <div className="text-sm">
+                          #{String(t.id).slice(-4)} • {t.stream}
+                        </div>
+                        <button
+                          onClick={() => deliver(t)}
+                          disabled={isBusy}
+                          className="rounded-lg border bg-black text-white text-sm px-3 py-2 hover:opacity-90 disabled:opacity-60"
+                        >
+                          {isBusy ? "Delivering…" : "Mark delivered"}
+                        </button>
+                      </div>
+
+                      {/* ⬇️ NEW: item list for this ticket */}
+                      <ul className="px-3 pb-2 space-y-1">
+                        {(t.items ?? []).length ? (
+                          (t.items as LineItem[]).map((li, i) => (
+                            <li key={i} className="flex items-center justify-between text-base">
+                              <span className="truncate">{li.name}</span>
+                              <span className="font-semibold">×{li.qty}</span>
+                            </li>
+                          ))
+                        ) : (
+                          <li className="text-sm text-gray-500">No items.</li>
+                        )}
+                      </ul>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -284,7 +349,6 @@ export default function RunnerPage() {
                 <div className="font-semibold">
                   Table {g.table_number ?? "—"} • <span className="font-mono">{g.order_code}</span>
                 </div>
-                {/* no "Open status" link */}
               </div>
 
               {/* issue list */}
@@ -313,7 +377,6 @@ export default function RunnerPage() {
                 >
                   {busyAck === g.order_code ? "Notifying…" : "Runner bringing fix"}
                 </button>
-                {/* no "Open status" button */}
               </div>
             </div>
           ))}

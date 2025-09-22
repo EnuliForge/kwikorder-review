@@ -1,151 +1,181 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+type Status = "received" | "preparing" | "ready" | "cancelled" | "delivered" | "completed";
 type Ticket = {
   id: number;
-  order_group_id: number;
-  stream: "food" | "drinks";
-  status: "received" | "preparing" | "ready" | "delivered" | "completed" | "cancelled";
-  created_at: string;
+  status: Status;
+  created_at: string | null;
+  ready_at: string | null;
+  order_code: string;
+  table_number: number | null;
+  items: { name: string; qty: number }[];
 };
 
-function makeSupa() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
+const ALLOWED_NEXT: Record<Status, Status[]> = {
+  received:   ["preparing", "cancelled"],
+  preparing:  ["ready", "cancelled"],
+  ready:      ["cancelled"], // Kitchen doesn't deliver; runner does
+  delivered:  [],
+  cancelled:  [],
+  completed:  [],
+};
+
+function Badge({ status }: { status: Status }) {
+  const map: Record<Status, string> = {
+    delivered: "bg-emerald-100 text-emerald-800",
+    ready: "bg-amber-100 text-amber-800",
+    preparing: "bg-sky-100 text-sky-800",
+    received: "bg-gray-100 text-gray-700",
+    cancelled: "bg-red-100 text-red-800",
+    completed: "bg-emerald-100 text-emerald-800",
+  };
+  return <span className={`px-3 py-1 rounded-full text-sm capitalize ${map[status]}`}>{status}</span>;
 }
 
 export default function KitchenKDS() {
-  const supa = useMemo(makeSupa, []);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // track which ticket is updating and which action (preparing | ready)
-  const [busy, setBusy] = useState<{ id: number; action: "preparing" | "ready" } | null>(null);
-
-  async function load() {
-    setErr(null);
-    const { data, error } = await supa
-      .from("tickets")
-      .select("id, order_group_id, stream, status, created_at")
-      .eq("stream", "food")
-      .in("status", ["received", "preparing"]) // ready tickets drop off this view
-      .order("created_at", { ascending: true });
-    if (error) setErr(error.message);
-    else setTickets((data || []) as Ticket[]);
-  }
+  const load = async () => {
+    try {
+      setErr(null);
+      const r = await fetch(`/api/kds/list?stream=food`, { cache: "no-store" });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || "Failed to load");
+      setTickets(j.tickets ?? []);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     load();
-    const ch = supa
-      .channel("kds_kitchen")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "tickets", filter: "stream=eq.food" },
-        () => load()
-      )
-      .subscribe();
-    return () => { supa.removeChannel(ch); };
-  }, [supa]);
+    timerRef.current = setInterval(load, 4000);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = null;
+    };
+  }, []);
 
-  async function setStatus(id: number, next: "preparing" | "ready") {
-    // optimistic update for instant visual change
-    const prev = tickets;
-    setBusy({ id, action: next });
-    setTickets(prev.map(t => (t.id === id ? { ...t, status: next } : t)));
-
+  const startPreparing = async (t: Ticket) => {
+    if (!ALLOWED_NEXT[t.status].includes("preparing")) return;
+    setBusyId(t.id);
     try {
-      const r = await fetch("/api/tickets/update-status", {
-        method: "POST",
+      const res = await fetch("/api/tickets/update-status", {
+        method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ticket_id: id, status: next }),
+        body: JSON.stringify({ order_code: t.order_code, stream: "food", next_status: "preparing" }),
       });
-      if (!r.ok) {
-        const msg = await r.text();
-        throw new Error(msg || "Failed to update");
-      }
+      const j = await res.json();
+      if (!res.ok || !j.ok) throw new Error(j.error || "Update failed");
+      await load();
     } catch (e: any) {
-      // revert on error + surface message
-      setTickets(prev);
-      setErr(e?.message || "Failed to update");
+      alert(e?.message || "Failed to update");
     } finally {
-      setBusy(null);
-      // pull fresh snapshot (and also removes ready tickets from list)
-      load();
+      setBusyId(null);
     }
-  }
+  };
+
+  const markReady = async (t: Ticket) => {
+    if (!ALLOWED_NEXT[t.status].includes("ready")) return;
+    setBusyId(t.id);
+    try {
+      const res = await fetch("/api/tickets/update-status", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ order_code: t.order_code, stream: "food", next_status: "ready" }),
+      });
+      const j = await res.json();
+      if (!res.ok || !j.ok) throw new Error(j.error || "Update failed");
+      await load();
+    } catch (e: any) {
+      alert(e?.message || "Failed to update");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Optional sort: status then created_at
+  const grouped = useMemo(() => {
+    const ord: Record<Status, number> = { received: 0, preparing: 1, ready: 2, cancelled: 3, delivered: 4, completed: 5 };
+    return [...tickets].sort((a, b) => {
+      const s = ord[a.status] - ord[b.status];
+      if (s !== 0) return s;
+      return (new Date(a.created_at || 0).getTime()) - (new Date(b.created_at || 0).getTime());
+    });
+  }, [tickets]);
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <h1 className="text-2xl font-bold mb-4">KDS — Kitchen</h1>
-      {err && <div className="mb-3 rounded border border-red-200 bg-red-50 p-3 text-red-700">{err}</div>}
+    <main className="mx-auto max-w-6xl p-4">
+      <header className="mb-4 flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Kitchen</h1>
+        <div className="text-sm text-gray-600">Stream: <span className="font-semibold">Food</span></div>
+      </header>
 
-      <div className="grid gap-3">
-        {tickets.length === 0 && (
-          <div className="rounded-xl border p-4 text-sm text-gray-600">No kitchen tickets waiting.</div>
-        )}
+      {err && <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">{err}</div>}
 
-        {tickets.map((t) => {
-          const isBusy = busy?.id === t.id;
-          const starting = isBusy && busy?.action === "preparing";
-          const readying = isBusy && busy?.action === "ready";
-
-          return (
-            <div key={t.id} className="rounded-xl border p-4 bg-white">
-              <div className="flex items-center justify-between">
-                <div className="font-semibold">Ticket #{String(t.id).slice(-4)}</div>
-                <div className="text-xs rounded-full border px-2 py-1 capitalize">{t.status}</div>
+      {loading ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-40 rounded-2xl bg-gray-100 animate-pulse" />
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {grouped.map((t) => (
+            <article key={t.id} className="rounded-2xl border bg-white p-4">
+              <div className="mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="text-xl font-extrabold">Table {t.table_number ?? "—"}</div>
+                  <div className="text-xs text-gray-500">#{t.order_code}</div>
+                </div>
+                <Badge status={t.status} />
               </div>
 
-              <div className="mt-3 flex gap-2">
-                {t.status === "received" && (
-                  <button
-                    onClick={() => setStatus(t.id, "preparing")}
-                    disabled={isBusy}
-                    className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50 disabled:opacity-60 disabled:pointer-events-none"
-                  >
-                    {starting ? (
-                      <span className="inline-flex items-center gap-2">
-                        <Spinner /> Starting…
-                      </span>
-                    ) : (
-                      "Start preparing"
-                    )}
-                  </button>
+              {/* Items list — large & readable */}
+              <ul className="mt-2 space-y-1">
+                {t.items.length ? (
+                  t.items.map((li, i) => (
+                    <li key={i} className="flex items-center justify-between text-base">
+                      <span className="truncate">{li.name}</span>
+                      <span className="font-semibold">×{li.qty}</span>
+                    </li>
+                  ))
+                ) : (
+                  <li className="text-sm text-gray-500">No items.</li>
                 )}
+              </ul>
 
-                {(t.status === "received" || t.status === "preparing") && (
-                  <button
-                    onClick={() => setStatus(t.id, "ready")}
-                    disabled={isBusy}
-                    className="rounded-lg border bg-black text-white px-3 py-2 text-sm hover:opacity-90 disabled:opacity-60 disabled:pointer-events-none"
-                  >
-                    {readying ? (
-                      <span className="inline-flex items-center gap-2">
-                        <Spinner /> Marking ready…
-                      </span>
-                    ) : (
-                      "Mark ready"
-                    )}
-                  </button>
-                )}
+              {/* Actions */}
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  onClick={() => startPreparing(t)}
+                  disabled={busyId === t.id || !ALLOWED_NEXT[t.status].includes("preparing")}
+                  className="rounded-xl border px-3 py-2 text-sm disabled:opacity-50"
+                  title="Move to preparing"
+                >
+                  {busyId === t.id && ALLOWED_NEXT[t.status].includes("preparing") ? "Updating…" : "Start preparing"}
+                </button>
+                <button
+                  onClick={() => markReady(t)}
+                  disabled={busyId === t.id || !ALLOWED_NEXT[t.status].includes("ready")}
+                  className="rounded-xl bg-black text-white px-3 py-2 text-sm disabled:opacity-50"
+                  title="Mark ready"
+                >
+                  {busyId === t.id && ALLOWED_NEXT[t.status].includes("ready") ? "Updating…" : "Mark ready"}
+                </button>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            </article>
+          ))}
+        </div>
+      )}
     </main>
-  );
-}
-
-function Spinner() {
-  return (
-    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" opacity="0.25" />
-      <path d="M22 12a10 10 0 0 1-10 10" fill="none" stroke="currentColor" strokeWidth="3" />
-    </svg>
   );
 }

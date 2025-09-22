@@ -18,12 +18,29 @@ export default function BottomCartDrawer() {
       setBusy(true);
       setError(null);
 
+      // ⬇️ NEW: read table number from localStorage
+      let table_number: number | null = null;
+      try {
+        const t = localStorage.getItem("kwik.table");
+        if (t) {
+          const n = parseInt(t, 10);
+          if (Number.isFinite(n) && n > 0) table_number = n;
+        }
+      } catch {
+        // ignore
+      }
+
+      if (!table_number) {
+        setOpen(true);
+        setError("Please enter your table number on the main page first.");
+        return;
+      }
+
       const res = await fetch("/api/orders/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          // Replace with a real table number once you have it from QR scan / landing page
-          table_number: null,
+          table_number, // ⬅️ NEW: send the table number
           items: items.map((i) => ({
             id: i.id,
             name: i.name,
@@ -35,11 +52,23 @@ export default function BottomCartDrawer() {
       });
 
       const j = await res.json();
-      if (!res.ok || !j.ok) throw new Error(j.error || "Order failed");
+      if (!res.ok || (!j.ok && !j.order_code)) {
+        throw new Error(j.error || "Order failed");
+      }
+
+      // Be a little forgiving about response shape
+      const orderCode: string =
+        j.order_code || j?.data?.order_code || j?.order?.order_code;
+
+      if (!orderCode) {
+        throw new Error("Order created but no order code returned");
+      }
+
       // Optional: clear local cart once order is accepted
       clear();
+
       // Navigate to the live status page
-      router.push(`/status/${encodeURIComponent(j.order_code)}`);
+      router.push(`/status/${encodeURIComponent(orderCode)}`);
     } catch (e: any) {
       setError(e?.message || "Failed to place order");
     } finally {
