@@ -1,63 +1,68 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js";
 
-type CartLine = {
-  id: number | string;
+type CartItem = {
+  id?: number | string | null;     // optional menu id
   name: string;
-  price: number;
   qty: number;
+  price?: number | string | null;  // not used in DB write right now
   stream: "food" | "drinks";
 };
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
-
-  const { table_number, items } = req.body ?? {};
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ ok: false, error: "items[] required" });
+  if (req.method !== "POST") {
+    return res.status(405).json({ ok: false, error: "Method not allowed" });
   }
-
-  const clean: CartLine[] = [];
-  for (const it of items) {
-    if (!it) continue;
-    const stream = it.stream;
-    if (stream !== "food" && stream !== "drinks") {
-      return res.status(400).json({ ok: false, error: "Invalid stream in items" });
-    }
-    const qty = Number(it.qty ?? 1);
-    if (qty <= 0) continue;
-
-    clean.push({
-      id: it.id,
-      name: String(it.name ?? ""),
-      price: Number(it.price ?? 0),
-      qty,
-      stream,
-    });
-  }
-  if (clean.length === 0) return res.status(400).json({ ok: false, error: "No valid items" });
 
   try {
-    const s = createClient(
+    const { table_number, items } = (req.body ?? {}) as {
+      table_number?: number | null;
+      items?: CartItem[];
+    };
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ ok: false, error: "items[] required" });
+    }
+
+    // Basic validation/sanitization
+    for (const it of items) {
+      if (!it?.name || typeof it.name !== "string") {
+        return res.status(400).json({ ok: false, error: "each item requires name" });
+      }
+      if (it.stream !== "food" && it.stream !== "drinks") {
+        return res.status(400).json({ ok: false, error: "each item requires stream = 'food' | 'drinks'" });
+      }
+      if (!Number.isFinite(Number(it.qty)) || Number(it.qty) <= 0) {
+        return res.status(400).json({ ok: false, error: "each item requires qty > 0" });
+      }
+    }
+
+    const supa = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!, // server key
+      process.env.SUPABASE_SERVICE_ROLE_KEY!, // server-only key
       { auth: { persistSession: false } }
     );
 
-    const { data, error } = await s.rpc("create_order_with_items", {
+    // Call the DB helper to create the order, split into tickets, and insert line items
+    const { data, error } = await supa.rpc("create_order_with_items", {
       p_table_number: table_number ?? null,
-      p_items: clean as any, // Supabase JSON-encodes
+      p_items: items as any, // supabase-js will send this as JSONB
     });
 
-    if (error) return res.status(400).json({ ok: false, error: error.message });
+    if (error) {
+      return res.status(500).json({ ok: false, error: error.message });
+    }
 
+    // Function returns table(order_code text) — supabase gives it as an array of rows
     const order_code =
-      Array.isArray(data) ? data[0]?.order_code : (data as any)?.order_code;
+      Array.isArray(data) && data.length > 0 ? (data[0] as any).order_code : null;
 
-    if (!order_code) return res.status(500).json({ ok: false, error: "No order_code returned" });
+    if (!order_code) {
+      return res.status(500).json({ ok: false, error: "Failed to generate order_code" });
+    }
 
     return res.status(200).json({ ok: true, order_code });
   } catch (e: any) {
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+    return res.status(500).json({ ok: false, error: e?.message || "Unexpected error" });
   }
 }
