@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useCart } from "@/components/CartProvider";
 
@@ -9,7 +9,17 @@ export default function BottomCartDrawer() {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [table, setTable] = useState<number | null>(null);
   const router = useRouter();
+
+  useEffect(() => {
+    try {
+      const t = localStorage.getItem("kwik.table");
+      setTable(t ? parseInt(t, 10) : null);
+    } catch {
+      setTable(null);
+    }
+  }, []);
 
   if (items.length === 0) return null;
 
@@ -18,57 +28,34 @@ export default function BottomCartDrawer() {
       setBusy(true);
       setError(null);
 
-      // ⬇️ NEW: read table number from localStorage
-      let table_number: number | null = null;
-      try {
-        const t = localStorage.getItem("kwik.table");
-        if (t) {
-          const n = parseInt(t, 10);
-          if (Number.isFinite(n) && n > 0) table_number = n;
-        }
-      } catch {
-        // ignore
+      if (!table || !Number.isFinite(table) || table <= 0) {
+        throw new Error("Please set your table number on the start page before placing an order.");
       }
 
-      if (!table_number) {
-        setOpen(true);
-        setError("Please enter your table number on the main page first.");
-        return;
-      }
+      const payload = {
+        table_number: table,
+        items: items.map((i) => ({
+          // IMPORTANT: only send a numeric id for DB (or null)
+          id: typeof i.baseId === "number" ? i.baseId : null,
+          name: i.name,
+          price: i.price,
+          qty: i.qty,
+          stream: i.stream,
+          notes: i.notes ?? null, // server can ignore if not used
+        })),
+      };
 
       const res = await fetch("/api/orders/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          table_number, // ⬅️ NEW: send the table number
-          items: items.map((i) => ({
-            id: i.id,
-            name: i.name,
-            price: i.price,
-            qty: i.qty,
-            stream: i.stream, // "food" | "drinks" — used for ticket split server-side
-          })),
-        }),
+        body: JSON.stringify(payload),
       });
 
-      const j = await res.json();
-      if (!res.ok || (!j.ok && !j.order_code)) {
-        throw new Error(j.error || "Order failed");
-      }
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || !j.ok) throw new Error(j.error || "Order failed");
 
-      // Be a little forgiving about response shape
-      const orderCode: string =
-        j.order_code || j?.data?.order_code || j?.order?.order_code;
-
-      if (!orderCode) {
-        throw new Error("Order created but no order code returned");
-      }
-
-      // Optional: clear local cart once order is accepted
       clear();
-
-      // Navigate to the live status page
-      router.push(`/status/${encodeURIComponent(orderCode)}`);
+      router.push(`/status/${encodeURIComponent(j.order_code)}`);
     } catch (e: any) {
       setError(e?.message || "Failed to place order");
     } finally {
@@ -103,6 +90,14 @@ export default function BottomCartDrawer() {
               </div>
             )}
 
+            {/* Table badge */}
+            <div className="mb-2 text-sm">
+              Table:{" "}
+              <span className="font-semibold">
+                {table ?? "— (set on start page)"}
+              </span>
+            </div>
+
             {/* Lines */}
             <div className="divide-y">
               {items.map((it) => (
@@ -114,6 +109,12 @@ export default function BottomCartDrawer() {
                     <div className="font-medium">{it.name}</div>
                     <div className="text-xs text-gray-500">
                       {it.stream === "drinks" ? "Drinks" : "Food"}
+                      {it.notes ? (
+                        <>
+                          {" "}
+                          • <span className="italic">{it.notes}</span>
+                        </>
+                      ) : null}
                     </div>
                   </div>
 
@@ -144,7 +145,8 @@ export default function BottomCartDrawer() {
             {/* Totals + actions */}
             <div className="mt-3 flex items-center justify-between">
               <div className="text-sm text-gray-600">
-                Subtotal: <span className="font-semibold">K {total.toFixed(2)}</span>
+                Subtotal:{" "}
+                <span className="font-semibold">K {total.toFixed(2)}</span>
               </div>
               <div className="flex gap-2">
                 <button
@@ -165,7 +167,7 @@ export default function BottomCartDrawer() {
               </div>
             </div>
 
-            {/* Optional: note about split delivery */}
+            {/* Note */}
             <p className="mt-2 text-xs text-gray-500">
               Orders are split into Food & Drinks so items can be delivered as soon as they’re ready.
             </p>
