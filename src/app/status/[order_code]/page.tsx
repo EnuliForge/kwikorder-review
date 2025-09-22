@@ -26,6 +26,7 @@ type StatusPayload = {
   resolution_required?: boolean;
   has_runner_ack?: boolean;
   issues?: IssueLite[];
+  table_number?: number | null; // ⬅️ ensure type includes this
 };
 
 /* -------------------------- UI Constants ------------------------- */
@@ -138,6 +139,33 @@ export default function StatusPage({ params }: { params: Promise<{ order_code: s
       askedThisSessionRef.current = true;
     }
   }, [hasRunnerAck]);
+
+  /* ----------------- End session + idle auto-return ----------------- */
+  function endSession() {
+    try { localStorage.removeItem("kwik.table"); } catch {}
+    router.replace("/start");
+  }
+
+  // 15m idle -> only when truly safe (all delivered + no issues + customer confirmed)
+  const lastActiveRef = useRef<number>(Date.now());
+  useEffect(() => {
+    const bump = () => { lastActiveRef.current = Date.now(); };
+    const evs: (keyof WindowEventMap)[] = ["click", "keydown", "touchstart", "scroll", "visibilitychange"];
+    evs.forEach((e) => window.addEventListener(e, bump, { passive: true } as any));
+
+    const t = setInterval(() => {
+      const idleMs = Date.now() - lastActiveRef.current;
+      const canLeave = showCompleteBanner; // derived: all delivered, no issues, and customer confirmed
+      if (canLeave && idleMs >= 15 * 60 * 1000) {
+        endSession();
+      }
+    }, 60 * 1000);
+
+    return () => {
+      evs.forEach((e) => window.removeEventListener(e, bump as any));
+      clearInterval(t);
+    };
+  }, [showCompleteBanner]);
 
   /* ---------------------- Delivered confirmation ---------------------- */
   async function handleDeliveredConfirmed() {
@@ -349,23 +377,32 @@ export default function StatusPage({ params }: { params: Promise<{ order_code: s
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-6">
-      <div className="mb-4 flex items-center justify-between">
-        <div className="mb-4 flex items-center justify-between">
-  <h1 className="text-2xl font-bold">Order {order_code}</h1>
-  {tableNumber != null && (
-    <div className="rounded-full border px-3 py-1 text-sm">
-      Table <span className="font-semibold">{tableNumber}</span>
-    </div>
-  )}
-</div>
-        {/* Always-available "Back to Menu" */}
-        <a
-          href={`/menu?oc=${encodeURIComponent(order_code)}`}
-          className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-        >
-          Back to Menu
-        </a>
-      </div>
+      <header className="mb-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold">Order {order_code}</h1>
+          {tableNumber != null && (
+            <div className="rounded-full border px-3 py-1 text-sm">
+              Table <span className="font-semibold">{tableNumber}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <a
+            href={`/menu?oc=${encodeURIComponent(order_code)}`}
+            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+          >
+            Back to Menu
+          </a>
+          <button
+            onClick={endSession}
+            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+            title="Clear table and return to start"
+          >
+            End session
+          </button>
+        </div>
+      </header>
 
       {/* amber banner while any issue is open */}
       {resolutionRequired && (

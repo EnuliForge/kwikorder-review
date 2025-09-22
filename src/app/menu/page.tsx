@@ -1,9 +1,9 @@
 // src/app/menu/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import CartProvider from "../../components/CartProvider";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import CartProvider, { useCart } from "../../components/CartProvider";
 import MenuItemCard from "../../components/MenuItemCard";
 import BottomCartDrawer from "../../components/BottomCartDrawer";
 import SearchBar from "../../components/SearchBar";
@@ -14,15 +14,13 @@ function MenuInner() {
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
 
-  // Read table from URL (?table=12 or ?t=12) then persist to localStorage.
-  // Fallback to localStorage if no URL param.
   const searchParams = useSearchParams();
-  const [table, setTable] = useState<number | null>(null);
+  const router = useRouter();
 
+  // Table number
+  const [table, setTable] = useState<number | null>(null);
   useEffect(() => {
     let resolved: number | null = null;
-
-    // 1) URL param
     const fromUrl = searchParams.get("table") || searchParams.get("t");
     if (fromUrl) {
       const n = parseInt(fromUrl, 10);
@@ -31,8 +29,6 @@ function MenuInner() {
         try { localStorage.setItem("kwik.table", String(n)); } catch {}
       }
     }
-
-    // 2) localStorage fallback
     if (resolved === null) {
       try {
         const t = localStorage.getItem("kwik.table");
@@ -42,10 +38,10 @@ function MenuInner() {
         }
       } catch {}
     }
-
     setTable(resolved);
   }, [searchParams]);
 
+  // Load menu
   useEffect(() => {
     (async () => {
       setLoading(true);
@@ -64,7 +60,33 @@ function MenuInner() {
     );
   }, [items, q]);
 
-  // (Optional) quick way to change table from here if needed
+  // --- New: End Session button
+  function endSession() {
+    try { localStorage.removeItem("kwik.table"); } catch {}
+    router.replace("/start");
+  }
+
+  // --- New: idle auto-return (15 min) ONLY if cart empty
+  const { items: cartItems } = useCart();
+  const lastActiveRef = useRef<number>(Date.now());
+  useEffect(() => {
+    const bump = () => { lastActiveRef.current = Date.now(); };
+    const evs: (keyof WindowEventMap)[] = ["click", "keydown", "touchstart", "scroll", "visibilitychange"];
+    evs.forEach((e) => window.addEventListener(e, bump, { passive: true } as any));
+    const t = setInterval(() => {
+      const idleMs = Date.now() - lastActiveRef.current;
+      const canLeave = cartItems.length === 0; // safe if nothing in cart
+      if (canLeave && idleMs >= 15 * 60 * 1000) {
+        endSession();
+      }
+    }, 60 * 1000);
+    return () => {
+      evs.forEach((e) => window.removeEventListener(e, bump as any));
+      clearInterval(t);
+    };
+  }, [cartItems.length]); // re-evaluate when cart changes
+
+  // Optional: change table quickly
   const changeTable = () => {
     const input = prompt("Enter table number");
     if (!input) return;
@@ -72,33 +94,36 @@ function MenuInner() {
     if (!Number.isFinite(n) || n <= 0) return alert("Invalid table number");
     setTable(n);
     try { localStorage.setItem("kwik.table", String(n)); } catch {}
+    router.replace(`/menu?table=${n}`);
   };
 
   return (
     <main className="mx-auto max-w-6xl px-4 pb-40">
-      {/* Header with table badge */}
-      <header className="mb-3 flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Menu</h1>
+      {/* Header */}
+      <header className="mb-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-bold">Menu</h1>
           <div className="rounded-full border px-3 py-1 text-sm">
-            {table != null ? (
-              <>Table <span className="font-semibold">{table}</span></>
-            ) : (
-              <span className="text-gray-500">No table set</span>
-            )}
+            {table != null ? <>Table <span className="font-semibold">{table}</span></> : <span className="text-gray-500">No table set</span>}
           </div>
           <button
             type="button"
             className="text-xs rounded-md border px-2 py-1 hover:bg-gray-50"
             onClick={changeTable}
-            title="Change table"
           >
             Change
           </button>
         </div>
+        <button
+          type="button"
+          onClick={endSession}
+          className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+          title="Clear table and return to start"
+        >
+          End session
+        </button>
       </header>
 
-      {/* Gentle banner so it's obvious */}
       {table != null ? (
         <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-emerald-800">
           Ordering for <strong>Table {table}</strong>.

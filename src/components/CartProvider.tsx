@@ -23,6 +23,7 @@ type CartContextShape = {
   add: (item: CartItem) => void;
   inc: (id: string | number) => void;
   dec: (id: string | number) => void;
+  remove: (id: string | number) => void; // ⬅️ NEW
   clear: () => void;
 };
 
@@ -45,7 +46,7 @@ export default function CartProvider({ children }: { children: React.ReactNode }
         return [...prev, { ...newItem, qty: Math.max(1, newItem.qty || 1) }];
       }
 
-      // Legacy merge path for numeric ids (non-configurable items)
+      // Merge path for numeric ids (non-configurable items)
       const idx = prev.findIndex((p) => p.id === newItem.id);
       if (idx >= 0) {
         const copy = [...prev];
@@ -70,6 +71,10 @@ export default function CartProvider({ children }: { children: React.ReactNode }
     );
   };
 
+  const remove = (id: string | number) => {
+    setItems((prev) => prev.filter((it) => it.id === id ? false : true));
+  };
+
   const clear = () => setItems([]);
 
   const total = useMemo(
@@ -78,7 +83,7 @@ export default function CartProvider({ children }: { children: React.ReactNode }
   );
 
   const value = useMemo(
-    () => ({ items, total, add, inc, dec, clear }),
+    () => ({ items, total, add, inc, dec, remove, clear }),
     [items, total]
   );
 
