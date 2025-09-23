@@ -1,26 +1,30 @@
-// src/app/status/[order_code]/page.tsx
+// src/app/status/table/[table]/page.tsx
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, memo } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { redirect } from "next/navigation";
 
+type Stream = "food" | "drinks";
+type TicketStatus = "received" | "preparing" | "ready" | "cancelled" | "delivered" | "completed";
 type LineItem = { name: string; qty: number };
+
 type Ticket = {
   id: number;
-  stream: "food" | "drinks";
-  status: "received" | "preparing" | "ready" | "cancelled" | "delivered" | "completed";
+  stream: Stream;
+  status: TicketStatus;
   delivered_at: string | null;
   ready_at?: string | null;
   created_at?: string;
   items?: LineItem[];
   has_issue?: boolean;
 };
+
 type IssueOut = {
   status: "open" | "runner_ack" | "client_ack" | "resolved";
   ticket_id: number | null;
-  stream: "food" | "drinks" | null;
+  stream: Stream | null;
 };
+
 type StatusPayload = {
   ok: boolean;
   tickets: Ticket[];
@@ -32,7 +36,7 @@ type StatusPayload = {
   runner_ack_ticket_ids?: number[];
 };
 
-const ISSUE_TYPES_BY_STREAM: Record<"food" | "drinks", { value: string; label: string }[]> = {
+const ISSUE_TYPES_BY_STREAM: Record<Stream, { value: string; label: string }[]> = {
   food: [
     { value: "wrong_food", label: "Wrong food" },
     { value: "missing_item", label: "Missing item" },
@@ -61,8 +65,85 @@ function Badge({ status }: { status: Ticket["status"] }) {
   return <span className={`px-3 py-1 rounded-full text-sm capitalize ${map[status]}`}>{status}</span>;
 }
 
-export default function StatusPage() {
-  const { order_code } = useParams<{ order_code: string }>();
+export default function TableStatusPage() {
+  const { table } = useParams<{ table: string }>();
+  const router = useRouter();
+  const tableNum = Number(table);
+
+  const [orderCodes, setOrderCodes] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function loadActiveOrders() {
+    try {
+      setErr(null);
+      const r = await fetch(`/api/orders/active-for-table?table=${encodeURIComponent(String(tableNum))}`, {
+        cache: "no-store",
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j?.error || "Failed to load active orders");
+      const codes = (j.orders ?? []).map((o: any) => String(o.order_code));
+      setOrderCodes(codes);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load active orders");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!Number.isFinite(tableNum)) {
+      router.replace("/status");
+      return;
+    }
+    loadActiveOrders();
+    const t = setInterval(loadActiveOrders, 6000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableNum]);
+
+  // after any order closes, reload; if none left → menu
+  async function handleOrderClosed() {
+    await loadActiveOrders();
+    if (orderCodes.length <= 1) {
+      router.replace("/menu");
+    }
+  }
+
+  return (
+    <main className="mx-auto max-w-3xl px-4 py-6">
+      <div className="mb-4 flex items-center justify-between">
+        <div className="flex items-center">
+          <h1 className="text-2xl font-bold">Table {Number.isFinite(tableNum) ? tableNum : "—"}</h1>
+          <span className="ml-3 rounded-full border px-3 py-1 text-sm">
+            Active orders: <span className="font-semibold">{orderCodes.length}</span>
+          </span>
+        </div>
+        <a href="/menu" className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50">Back to Menu</a>
+      </div>
+
+      {err && <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">{err}</div>}
+
+      {loading ? (
+        <div className="grid gap-4">
+          <div className="h-28 rounded-2xl bg-gray-100 animate-pulse" />
+          <div className="h-28 rounded-2xl bg-gray-100 animate-pulse" />
+        </div>
+      ) : orderCodes.length === 0 ? (
+        <div className="rounded-xl border bg-white p-4 text-gray-600">No active orders.</div>
+      ) : (
+        <div className="grid gap-6">
+          {orderCodes.map((oc) => (
+            <OrderStatusPanel key={oc} orderCode={oc} onClosed={handleOrderClosed} />
+          ))}
+        </div>
+      )}
+    </main>
+  );
+}
+
+/** One order block (reuses your single-order behavior) */
+function OrderStatusPanel({ orderCode, onClosed }: { orderCode: string; onClosed: () => void }) {
   const router = useRouter();
 
   const [tickets, setTickets] = useState<Ticket[]>([]);
@@ -80,15 +161,11 @@ export default function StatusPage() {
   const [deliveredConfirmBusy, setDeliveredConfirmBusy] = useState(false);
 
   async function load() {
-    if (!order_code) {
-      setErr("Missing order code");
-      setLoading(false);
-      return;
-    }
+    if (!orderCode) return;
     if (pausePolling || hasAnyIssueOpenRef.current) return;
     try {
       setErr(null);
-      const r = await fetch(`/api/status?order_code=${encodeURIComponent(order_code)}`, { cache: "no-store" });
+      const r = await fetch(`/api/status?order_code=${encodeURIComponent(orderCode)}`, { cache: "no-store" });
       const j: StatusPayload = await r.json();
       if (!j.ok) throw new Error((j as any).error || "Failed to load");
 
@@ -105,18 +182,9 @@ export default function StatusPage() {
       setLoading(false);
     }
   }
-// near the top with other hooks
-useEffect(() => {
-  // once the customer has confirmed and no issues remain, head back to menu
-  if (customerConfirmedAt && !resolutionRequired) {
-    router.replace("/menu");
-  }
-}, [customerConfirmedAt, resolutionRequired, router]);
-
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
-    if (!order_code) return;
     load();
     timerRef.current = setInterval(load, 4000);
     return () => {
@@ -124,7 +192,7 @@ useEffect(() => {
       timerRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [order_code]);
+  }, [orderCode]);
 
   const allDelivered =
     tickets.length > 0 && tickets.every((t) => t.status === "delivered" || t.status === "completed");
@@ -136,11 +204,12 @@ useEffect(() => {
       const resp = await fetch("/api/orders/client-confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ order_code }),
+        body: JSON.stringify({ order_code: orderCode }),
       });
       const j = await resp.json().catch(() => ({}));
       if (!resp.ok || !j.ok) throw new Error(j?.error || "Failed to confirm");
-      router.replace("/menu");
+      // Let the parent decide where to go next (stay on table page or /menu)
+      await onClosed();
     } catch (e: any) {
       alert(e?.message || "Failed to confirm");
     } finally {
@@ -193,7 +262,7 @@ useEffect(() => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            order_code,
+            order_code: orderCode,
             ticket_id: t.id,
             type: sel,
             description: text.trim() || null,
@@ -214,11 +283,9 @@ useEffect(() => {
       }
     }
 
-    // Robust prompt: ticket delivered/completed AND runner-ack applies to this ticket/stream/order
     const showAckPrompt = (() => {
       if (!t) return false;
       const isDelivered = t.status === "delivered" || t.status === "completed";
-
       const ackOnThisTicket = runnerAckIds.includes(t.id);
       const ackOnSameStream = issues.some(
         (i) => i.status === "runner_ack" && i.ticket_id == null && i.stream === t.stream
@@ -226,7 +293,6 @@ useEffect(() => {
       const ackOrderWide = issues.some(
         (i) => i.status === "runner_ack" && i.ticket_id == null && i.stream == null
       );
-
       return isDelivered && (ackOnThisTicket || ackOnSameStream || ackOrderWide);
     })();
 
@@ -237,7 +303,6 @@ useEffect(() => {
           {t ? <Badge status={t.status} /> : <span className="text-sm text-gray-500">n/a</span>}
         </div>
 
-        {/* items */}
         {t?.items && t.items.length > 0 ? (
           <ul className="mb-2 list-none p-0 text-sm text-gray-800">
             {t.items.map((li, i) => (
@@ -251,7 +316,6 @@ useEffect(() => {
           <div className="text-gray-500 text-sm mb-2">No items in this stream.</div>
         )}
 
-        {/* status + issues */}
         {!t ? (
           <div className="text-gray-500 text-sm">—</div>
         ) : t.status === "delivered" || t.status === "completed" ? (
@@ -269,7 +333,7 @@ useEffect(() => {
                         const res = await fetch("/api/issues/client-ack", {
                           method: "POST",
                           headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ order_code, ticket_id: t.id }),
+                          body: JSON.stringify({ order_code: orderCode, ticket_id: t.id }),
                         });
                         const j = await res.json().catch(() => ({}));
                         if (!res.ok || !j.ok) throw new Error(j?.error || "Failed to confirm");
@@ -360,20 +424,14 @@ useEffect(() => {
   const drinks = tickets.find((t) => t.stream === "drinks");
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-6">
-      <div className="mb-4 flex items-center justify-between">
-        <div className="mb-4 flex items-center justify-between">
-          <h1 className="text-2xl font-bold">Order {order_code}</h1>
-          {tableNumber != null && (
-            <div className="ml-3 rounded-full border px-3 py-1 text-sm">
-              Table <span className="font-semibold">{tableNumber}</span>
-            </div>
-          )}
-        </div>
-        <a
-          href="/menu" className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-        >Back to Menu
-        </a>
+    <section className="rounded-2xl border p-4 bg-white">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-lg font-bold">Order {orderCode}</div>
+        {tableNumber != null && (
+          <div className="ml-3 rounded-full border px-3 py-1 text-sm">
+            Table <span className="font-semibold">{tableNumber}</span>
+          </div>
+        )}
       </div>
 
       {resolutionRequired && (
@@ -419,7 +477,7 @@ useEffect(() => {
           <Card
             t={food}
             title="Food"
-            anchorId="card-food"
+            anchorId={`card-food-${orderCode}`}
             reload={load}
             issues={issues}
             runnerAckIds={runnerAckIds}
@@ -427,13 +485,13 @@ useEffect(() => {
           <Card
             t={drinks}
             title="Drinks"
-            anchorId="card-drinks"
+            anchorId={`card-drinks-${orderCode}`}
             reload={load}
             issues={issues}
             runnerAckIds={runnerAckIds}
           />
         </div>
       )}
-    </main>
+    </section>
   );
 }

@@ -2,79 +2,68 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js";
 
-type Stream = "food" | "drinks";
-type IncomingItem = {
-  id?: number | string | null;
-  name: string;
-  price?: number | null; // optional here; not required by DB
-  qty: number;
-  stream: Stream;
-};
-
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
-  }
-
   try {
-    const { table_number, items } = (req.body ?? {}) as {
-      table_number?: number;
-      items?: IncomingItem[];
-    };
+    if (req.method !== "POST") {
+      return res.status(405).json({ ok: false, error: "Method not allowed" });
+    }
 
-    // Basic validation
-    const tn = Number(table_number);
-    if (!Number.isFinite(tn) || tn <= 0) {
-      return res.status(400).json({ ok: false, error: "Valid table_number required" });
+    const { table_number, items } = req.body ?? {};
+    const tableNum = Number(table_number);
+    if (!Number.isFinite(tableNum)) {
+      return res.status(400).json({ ok: false, error: "table_number must be numeric" });
     }
     if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ ok: false, error: "items array required" });
+      return res.status(400).json({ ok: false, error: "items must be a non-empty array" });
     }
-
-    const normalized = items.map((it, i) => {
-      const qty = Number(it.qty);
-      const stream = String(it.stream);
-      if (!["food", "drinks"].includes(stream)) {
-        throw new Error(`items[${i}].stream must be "food" or "drinks"`);
-      }
-      if (!qty || qty < 1) {
-        throw new Error(`items[${i}].qty must be >= 1`);
-      }
-      const name = (it.name || "").trim();
-      if (!name) {
-        throw new Error(`items[${i}].name required`);
-      }
-      return {
-        id: it.id ?? null,
-        name,
-        price: Number.isFinite(Number(it.price)) ? Number(it.price) : null,
-        qty,
-        stream, // "food" | "drinks"
-      };
-    });
 
     const supa = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!, // service role to bypass RLS for write
+      process.env.SUPABASE_SERVICE_ROLE_KEY!, // server-only
       { auth: { persistSession: false } }
     );
 
-    // Call the DB function to create order + split into tickets + insert line items
+    const isDigits = (v: any) =>
+      (typeof v === "number" && Number.isInteger(v) && v >= 0) ||
+      (typeof v === "string" && /^\d+$/.test(v));
+
+    const toInt = (v: any, fallback = 1) => {
+      const n = Number.parseInt(String(v), 10);
+      return Number.isFinite(n) && n > 0 ? n : fallback;
+    };
+
+    const toNumber = (v: any, fallback = 0) => {
+      if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
+      // strip currency symbols/spaces (e.g., "K 365.00")
+      const n = Number.parseFloat(String(v).replace(/[^0-9.]/g, ""));
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    // Sanitize cart items for the SQL function
+    const safeItems = items.map((it: any) => ({
+      // IMPORTANT: id must be digits-only; otherwise set to empty string
+      id: isDigits(it?.id) ? String(it.id) : "",
+      // stream must be "food" | "drinks" (default to "food" if missing)
+      stream: it?.stream === "drinks" ? "drinks" : "food",
+      name: it?.name ? String(it.name) : "(unnamed)",
+      qty: toInt(it?.qty, 1),
+      price: toNumber(it?.price, 0), // your SQL casts elem->>'price'::numeric
+    }));
+
+    // Call your SQL function (returns table(order_code text))
     const { data, error } = await supa.rpc("create_order_with_items", {
-      p_table_number: tn,
-      p_items: normalized as any, // jsonb
+      p_table_number: tableNum,
+      p_items: safeItems, // JSONB on the SQL side
     });
 
-    if (error) {
-      return res.status(500).json({ ok: false, error: error.message });
-    }
+    if (error) return res.status(500).json({ ok: false, error: error.message });
 
-    // Function returns table(order_code text)
-    const order_code: string | undefined =
-      Array.isArray(data) && data.length > 0 ? (data[0] as any).order_code : undefined;
+    // Supabase RPC can return either an array of rows or a single row
+    const order_code =
+      (Array.isArray(data) ? data[0]?.order_code : (data as any)?.order_code) ?? null;
 
     if (!order_code) {
-      return res.status(500).json({ ok: false, error: "Failed to create order (no code returned)" });
+      return res.status(500).json({ ok: false, error: "Could not create order" });
     }
 
     return res.status(200).json({ ok: true, order_code });

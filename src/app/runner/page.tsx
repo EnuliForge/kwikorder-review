@@ -1,386 +1,251 @@
+// src/app/runner/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type Stream = "food" | "drinks";
+type TicketStatus = "ready" | "received" | "preparing" | "cancelled" | "delivered" | "completed";
 
-type LineItem = { name: string; qty: number };
-
-type Ticket = {
-  id: number;
-  order_group_id: number;
+/** Tickets to deliver (from runner_queue view) */
+type DeliverRow = {
+  kind: "deliver";
+  ticket_id: number;
+  issue_id: null;
+  order_code: string;
+  table_number: number | null;
   stream: Stream;
-  status: "received" | "preparing" | "ready" | "delivered" | "completed" | "cancelled";
-  created_at: string;
-  order_groups?: { order_code: string; table_number: number | null } | null;
-  items?: LineItem[]; // ⬅️ NEW: items for this ticket
+  status: TicketStatus;
+  ready_at: string | null;
+  created_at: string | null; // not used for deliver, set null
 };
 
-type Group = {
-  order_code: string;
-  table_number: number | null;
-  tickets: Ticket[];
-};
-
+/** Open issues needing runner action */
 type IssueRow = {
-  id: number;
-  order_group_id: number;
-  ticket_id: number | null;
-  status: "open" | "runner_ack" | "client_ack" | "resolved";
-  type: string | null;
-  description: string | null;
-  created_at: string;
-  // joined
-  order_groups?: { order_code: string; table_number: number | null } | null;
-  tickets?: { stream: Stream } | null;
-};
-
-type IssueGroup = {
+  kind: "issue";
+  ticket_id: number | null; // may be null (order-wide or stream-level issue)
+  issue_id: number;
   order_code: string;
   table_number: number | null;
-  issues: Array<{
-    id: number;
-    stream: Stream | null;
-    type: string | null;
-    description: string | null;
-    status: IssueRow["status"];
-    created_at: string;
-  }>;
-  hasRunnerAck: boolean;
+  stream: Stream | null; // null = order-wide
+  status: null;
+  ready_at: null;
+  issue_type: string | null;
+  issue_status: "open" | "runner_ack" | "client_ack" | "resolved";
+  created_at: string | null;
 };
 
-function makeSupa() {
-  return createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
-}
+type Row = DeliverRow | IssueRow;
 
 export default function RunnerPage() {
-  const supa = useMemo(makeSupa, []);
-  const [groups, setGroups] = useState<Group[]>([]);
-  const [issues, setIssues] = useState<IssueGroup[]>([]);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
-  const [busyDeliver, setBusyDeliver] = useState<number | null>(null);
-  const [busyAck, setBusyAck] = useState<string | null>(null); // order_code
-  const [banner, setBanner] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const [busyIds, setBusyIds] = useState<number[]>([]);
+  const [toast, setToast] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
+
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  function showToast(type: "ok" | "err", msg: string) {
+    setToast({ type, msg });
+    window.setTimeout(() => setToast(null), 3500);
+  }
 
   async function load() {
-    setErr(null);
-
-    // A) Ready tickets (to deliver) + join order group (code/table)
-    const { data: ticketsData, error: tErr } = await supa
-      .from("tickets")
-      .select(
-        "id, order_group_id, stream, status, created_at, order_groups(order_code, table_number)"
-      )
-      .in("status", ["ready"])
-      .order("created_at", { ascending: true });
-
-    if (tErr) {
-      setErr(tErr.message);
-      setGroups([]);
-    } else {
-      const list = (ticketsData || []) as Ticket[];
-
-      // ⬇️ NEW: fetch items for these tickets
-      const ids = list.map((t) => t.id);
-      const { data: itemsData, error: liErr } = await supa
-        .from("ticket_line_items")
-        .select("ticket_id, name, qty")
-        .in("ticket_id", ids.length ? ids : [-1]);
-
-      if (liErr) {
-        setErr(liErr.message);
-      }
-
-      // Map items by ticket id
-      const itemsByTicket = new Map<number, LineItem[]>();
-      (itemsData || []).forEach((row: any) => {
-        const tid = Number(row.ticket_id);
-        const arr = itemsByTicket.get(tid) ?? [];
-        arr.push({ name: String(row.name), qty: Number(row.qty) });
-        itemsByTicket.set(tid, arr);
-      });
-
-      // Group by order_code, attach items to each ticket
-      const byOrder = new Map<string, Group>();
-      for (const t of list) {
-        const oc = t.order_groups?.order_code || `OG-${t.order_group_id}`;
-        const table = t.order_groups?.table_number ?? null;
-        const withItems: Ticket = { ...t, items: itemsByTicket.get(t.id) ?? [] };
-        if (!byOrder.has(oc)) byOrder.set(oc, { order_code: oc, table_number: table, tickets: [] });
-        byOrder.get(oc)!.tickets.push(withItems);
-      }
-
-      let all = Array.from(byOrder.values());
-
-      // Optional filter by order code / table #
-      if (search.trim()) {
-        const q = search.toLowerCase();
-        all = all.filter((g) => {
-          const codeHit = g.order_code.toLowerCase().includes(q);
-          const tableHit = g.table_number !== null && String(g.table_number).includes(q);
-          return codeHit || tableHit;
-        });
-      }
-
-      // Sort groups by earliest ticket created_at
-      all.sort((a, b) => {
-        const ta = a.tickets[0]?.created_at || "";
-        const tb = b.tickets[0]?.created_at || "";
-        return ta.localeCompare(tb);
-      });
-
-      setGroups(all);
-    }
-
-    // B) Unresolved issues (show details)
-    const { data: issuesData, error: iErr } = await supa
-      .from("issues")
-      .select(
-        "id, order_group_id, ticket_id, status, type, description, created_at, order_groups(order_code, table_number), tickets(stream)"
-      )
-      .neq("status", "resolved")
-      .order("created_at", { ascending: true });
-
-    if (iErr) {
-      setErr((prev) => prev || iErr.message);
-      setIssues([]);
-    } else {
-      const byOrder = new Map<string, IssueGroup>();
-      for (const row of (issuesData || []) as IssueRow[]) {
-        const oc = row.order_groups?.order_code || `OG-${row.order_group_id}`;
-        const table = row.order_groups?.table_number ?? null;
-        const g =
-          byOrder.get(oc) ||
-          { order_code: oc, table_number: table, issues: [], hasRunnerAck: false };
-        g.issues.push({
-          id: row.id,
-          stream: row.tickets?.stream ?? null,
-          type: row.type,
-          description: row.description,
-          status: row.status,
-          created_at: row.created_at,
-        });
-        if (row.status === "runner_ack") g.hasRunnerAck = true;
-        byOrder.set(oc, g);
-      }
-      let list = Array.from(byOrder.values());
-      if (search.trim()) {
-        const q = search.toLowerCase();
-        list = list.filter((g) => {
-          const codeHit = g.order_code.toLowerCase().includes(q);
-          const tableHit = g.table_number !== null && String(g.table_number).includes(q);
-          return codeHit || tableHit;
-        });
-      }
-      // Sort: non-acked first (need attention), then by newest issue
-      list.sort((a, b) => {
-        if (a.hasRunnerAck !== b.hasRunnerAck) return a.hasRunnerAck ? 1 : -1;
-        const aLatest = a.issues[a.issues.length - 1]?.created_at || "";
-        const bLatest = b.issues[b.issues.length - 1]?.created_at || "";
-        return bLatest.localeCompare(aLatest);
-      });
-      setIssues(list);
+    try {
+      setErr(null);
+      const r = await fetch("/api/runner/queue", { cache: "no-store" });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j?.error || "Failed to load runner queue");
+      setRows(Array.isArray(j.rows) ? (j.rows as Row[]) : []);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load runner queue");
+    } finally {
+      setLoading(false);
     }
   }
 
   useEffect(() => {
     load();
-    const ch = supa
-      .channel("runner_live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tickets" }, () => load())
-      .on("postgres_changes", { event: "*", schema: "public", table: "issues" }, () => load())
-      .subscribe();
-    return () => { supa.removeChannel(ch); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [supa]);
-
-  // ⬇️ CHANGED: deliver by using order_code + stream (matches your API)
-  async function deliver(t: Ticket) {
-    setBusyDeliver(t.id);
-    try {
-      const order_code = t.order_groups?.order_code || `OG-${t.order_group_id}`;
-      const res = await fetch("/api/tickets/update-status", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ order_code, stream: t.stream, next_status: "delivered" }),
-      });
-      const j = await res.json().catch(() => ({}));
-      if (!res.ok || !j.ok) throw new Error(j.error || "Failed to update");
-      setBanner("Delivered ✔");
-      setTimeout(() => setBanner(null), 1500);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to deliver");
-    } finally {
-      setBusyDeliver(null);
-      load();
-    }
-  }
-
-  async function runnerAckFix(order_code: string) {
-    setBusyAck(order_code);
-    try {
-      const r = await fetch("/api/issues/runner-resolve", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ order_code, mode: "runner_ack" }),
-      });
-      const text = await r.text();
-      if (!r.ok) throw new Error(text || "Failed");
-      setBanner(`Marked fix en route for ${order_code}`);
-      setTimeout(() => setBanner(null), 1500);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to acknowledge");
-    } finally {
-      setBusyAck(null);
-      load();
-    }
-  }
-
-  function IssueBadge({ status }: { status: IssueRow["status"] }) {
-    const map: Record<IssueRow["status"], string> = {
-      open: "bg-amber-100 text-amber-800",
-      runner_ack: "bg-sky-100 text-sky-800",
-      client_ack: "bg-purple-100 text-purple-800",
-      resolved: "bg-emerald-100 text-emerald-800",
+    timerRef.current = setInterval(load, 4000);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = null;
     };
-    return <span className={`text-xs px-2 py-1 rounded-full capitalize ${map[status]}`}>{status.replace("_"," ")}</span>;
+  }, []);
+
+  async function markDelivered(row: DeliverRow) {
+    try {
+      setBusyIds((s) => [...s, row.ticket_id]);
+      const resp = await fetch("/api/runner/deliver", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          order_code: row.order_code,
+          ticket_id: row.ticket_id,
+        }),
+      });
+      const j = await resp.json().catch(() => ({}));
+      if (!resp.ok || !j.ok) throw new Error(j?.error || "Failed to mark delivered");
+      showToast("ok", `Marked delivered: ${row.stream} • ${row.order_code}`);
+      await load();
+    } catch (e: any) {
+      showToast("err", e?.message || "Failed to mark delivered");
+    } finally {
+      setBusyIds((s) => s.filter((id) => id !== row.ticket_id));
+    }
   }
+
+  async function runnerBroughtFix(row: IssueRow) {
+    try {
+      // use ticket if available; else fall back to stream or order-wide
+      const payload: any = {
+        order_code: row.order_code,
+        mode: "runner_ack",
+        description: row.issue_type ? `Fix for ${row.issue_type}` : null,
+      };
+      if (row.ticket_id) payload.ticket_id = row.ticket_id;
+      else if (row.stream) payload.stream = row.stream;
+      else payload.order_wide = true;
+
+      const busyKey = row.ticket_id ?? -row.issue_id;
+      setBusyIds((s) => [...s, busyKey]);
+
+      const resp = await fetch("/api/issues/runner-resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const j = await resp.json().catch(() => ({}));
+      if (!resp.ok || !j.ok) throw new Error(j?.error || "Failed to record fix");
+
+      showToast("ok", `Fix recorded • ${row.order_code}`);
+      await load();
+    } catch (e: any) {
+      showToast("err", e?.message || "Failed to record fix");
+    } finally {
+      setBusyIds((s) => s.filter((id) => id !== (row.ticket_id ?? -row.issue_id)));
+    }
+  }
+
+  const sorted = useMemo(() => {
+    // Show newest issues first, then ready tickets by ready_at asc
+    const issues = rows.filter((r): r is IssueRow => r.kind === "issue");
+    const delivers = rows.filter((r): r is DeliverRow => r.kind === "deliver");
+
+    issues.sort(
+      (a, b) =>
+        (new Date(b.created_at ?? 0).getTime() || 0) -
+        (new Date(a.created_at ?? 0).getTime() || 0)
+    );
+    delivers.sort((a, b) => {
+      const ta = a.ready_at ? new Date(a.ready_at).getTime() : 0;
+      const tb = b.ready_at ? new Date(b.ready_at).getTime() : 0;
+      return ta - tb || a.ticket_id - b.ticket_id;
+    });
+
+    return [...issues, ...delivers];
+  }, [rows]);
 
   return (
-    <main className="mx-auto max-w-3xl p-6">
-      <header className="mb-4 flex items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Runner</h1>
-        <nav className="hidden md:flex items-center gap-2">
-          <a href="/kitchen" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Kitchen</a>
-          <a href="/bar" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Bar</a>
-        </nav>
-      </header>
+    <main className="mx-auto max-w-3xl px-4 py-6">
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Runner Tasks</h1>
+        <button
+          onClick={load}
+          className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+        >
+          Refresh
+        </button>
+      </div>
 
-      {banner && (
-        <div className="mb-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-emerald-900">
-          {banner}
+      {toast && (
+        <div
+          className={`mb-3 rounded-lg border p-3 text-sm ${
+            toast.type === "ok"
+              ? "border-emerald-300 bg-emerald-50 text-emerald-900"
+              : "border-red-300 bg-red-50 text-red-800"
+          }`}
+        >
+          {toast.msg}
         </div>
       )}
+
       {err && (
         <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">
           {err}
         </div>
       )}
 
-      <div className="mb-3 flex items-center gap-2">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Filter by order code or table #"
-          className="w-full rounded-lg border px-3 py-2 text-sm"
-        />
-        <button onClick={load} className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50">
-          Refresh
-        </button>
-      </div>
-
-      {/* Section A: Ready to deliver */}
-      <h2 className="text-lg font-semibold mb-2">Ready to deliver</h2>
-      {groups.length === 0 ? (
-        <div className="mb-6 rounded-xl border p-4 text-sm text-gray-600">No ready tickets.</div>
-      ) : (
-        <div className="mb-6 grid gap-4">
-          {groups.map((g) => (
-            <div key={g.order_code} className="rounded-2xl border p-4 bg-white">
-              <div className="font-semibold">
-                Table {g.table_number ?? "—"} • <span className="font-mono">{g.order_code}</span>
-              </div>
-
-              <div className="mt-3 grid gap-2">
-                {g.tickets.map((t) => {
-                  const isBusy = busyDeliver === t.id;
-                  return (
-                    <div key={t.id} className="rounded-lg border">
-                      <div className="flex items-center justify-between px-3 py-2">
-                        <div className="text-sm">
-                          #{String(t.id).slice(-4)} • {t.stream}
-                        </div>
-                        <button
-                          onClick={() => deliver(t)}
-                          disabled={isBusy}
-                          className="rounded-lg border bg-black text-white text-sm px-3 py-2 hover:opacity-90 disabled:opacity-60"
-                        >
-                          {isBusy ? "Delivering…" : "Mark delivered"}
-                        </button>
-                      </div>
-
-                      {/* ⬇️ NEW: item list for this ticket */}
-                      <ul className="px-3 pb-2 space-y-1">
-                        {(t.items ?? []).length ? (
-                          (t.items as LineItem[]).map((li, i) => (
-                            <li key={i} className="flex items-center justify-between text-base">
-                              <span className="truncate">{li.name}</span>
-                              <span className="font-semibold">×{li.qty}</span>
-                            </li>
-                          ))
-                        ) : (
-                          <li className="text-sm text-gray-500">No items.</li>
-                        )}
-                      </ul>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+      {loading ? (
+        <div className="grid gap-3">
+          <div className="h-20 rounded-xl bg-gray-100 animate-pulse" />
+          <div className="h-20 rounded-xl bg-gray-100 animate-pulse" />
+          <div className="h-20 rounded-xl bg-gray-100 animate-pulse" />
         </div>
-      )}
-
-      {/* Section B: Issues to handle */}
-      <h2 className="text-lg font-semibold mb-2">Issues to handle</h2>
-      {issues.length === 0 ? (
-        <div className="rounded-xl border p-4 text-sm text-gray-600">No unresolved issues.</div>
+      ) : sorted.length === 0 ? (
+        <div className="rounded-xl border bg-white p-4 text-gray-600">No tasks yet.</div>
       ) : (
-        <div className="grid gap-4">
-          {issues.map((g) => (
-            <div key={g.order_code} className="rounded-2xl border p-4 bg-white">
-              <div className="flex items-center justify-between">
-                <div className="font-semibold">
-                  Table {g.table_number ?? "—"} • <span className="font-mono">{g.order_code}</span>
+        <ul className="grid gap-3">
+          {sorted.map((row, idx) => {
+            const busyKey =
+              row.kind === "deliver" ? row.ticket_id : row.ticket_id ?? -row.issue_id;
+            const isBusy = busyIds.includes(busyKey);
+
+            const headerLeft =
+              row.kind === "deliver"
+                ? `Table ${row.table_number ?? "—"} • ${row.stream.toUpperCase()}`
+                : `Issue • ${row.stream ? row.stream.toUpperCase() : "ORDER"}`;
+
+            const sub =
+              row.kind === "deliver"
+                ? `Status: ${row.status}${
+                    row.ready_at ? ` (ready ${new Date(row.ready_at).toLocaleTimeString()})` : ""
+                  }`
+                : `${row.issue_type ?? "Issue"}${
+                    row.created_at ? ` • reported ${new Date(row.created_at).toLocaleTimeString()}` : ""
+                  }`;
+
+            return (
+              <li key={`${row.kind}-${idx}-${busyKey}`} className="rounded-2xl border bg-white p-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-lg font-semibold">{headerLeft}</div>
+                  <div className="text-sm text-gray-600">{row.order_code}</div>
                 </div>
-              </div>
 
-              {/* issue list */}
-              <ul className="mt-3 space-y-2">
-                {g.issues.map((it) => (
-                  <li key={it.id} className="rounded-lg border px-3 py-2">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm">
-                        <span className="font-medium capitalize">{it.stream ?? "unknown"}</span>
-                        {" • "}
-                        <span className="capitalize">{(it.type || "").replace("_"," ") || "issue"}</span>
-                        {it.description ? <> — <span className="text-gray-600">{it.description}</span></> : null}
-                      </div>
-                      <IssueBadge status={it.status} />
-                    </div>
-                  </li>
-                ))}
-              </ul>
+                <div className="mt-1 text-sm text-gray-700">{sub}</div>
 
-              <div className="mt-3 flex gap-2">
-                <button
-                  onClick={() => runnerAckFix(g.order_code)}
-                  disabled={busyAck === g.order_code}
-                  className="text-sm rounded-lg border bg-black text-white px-3 py-2 hover:opacity-90 disabled:opacity-60"
-                  title="Let the customer know you're bringing the fix"
-                >
-                  {busyAck === g.order_code ? "Notifying…" : "Runner bringing fix"}
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {row.kind === "deliver" ? (
+                    <button
+                      disabled={isBusy}
+                      onClick={() => markDelivered(row)}
+                      className="rounded-lg bg-black text-white px-3 py-2 text-sm disabled:opacity-60"
+                    >
+                      {isBusy ? "Working…" : "Mark delivered"}
+                    </button>
+                  ) : (
+                    <button
+                      disabled={isBusy}
+                      onClick={() => runnerBroughtFix(row)}
+                      className="rounded-lg border px-3 py-2 text-sm disabled:opacity-60"
+                    >
+                      Brought a fix
+                    </button>
+                  )}
+
+                  <a
+                    href={`/status/${encodeURIComponent(row.order_code)}`}
+                    className="ml-auto rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    View Status
+                  </a>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </main>
   );
