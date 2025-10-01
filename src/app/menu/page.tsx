@@ -9,15 +9,16 @@ import BottomCartDrawer from "../../components/BottomCartDrawer";
 import SearchBar from "../../components/SearchBar";
 import type { MenuItem } from "../../lib/types";
 
+type Section = { key: string; title: string; items: MenuItem[] };
+
 function MenuInner() {
   const [items, setItems] = useState<MenuItem[]>([]);
+  const [loading, setLoading] = useState(true);        // first-load skeleton
   const [q, setQ] = useState("");
-  const [loading, setLoading] = useState(true);
-
   const searchParams = useSearchParams();
   const router = useRouter();
 
-  // Table number
+  // ---------- Table number ----------
   const [table, setTable] = useState<number | null>(null);
   useEffect(() => {
     let resolved: number | null = null;
@@ -41,32 +42,48 @@ function MenuInner() {
     setTable(resolved);
   }, [searchParams]);
 
-  // Load menu
+  // ---------- Load + auto-refresh menu ----------
   useEffect(() => {
-    (async () => {
-      setLoading(true);
-      const r = await fetch("/api/menu", { cache: "no-store" });
-      const j = await r.json();
-      setItems(j.items ?? []);
-      setLoading(false);
-    })();
+    let alive = true;
+    let first = true;
+
+    const load = async () => {
+      try {
+        if (first) setLoading(true);
+        const r = await fetch("/api/menu?stream=all", { cache: "no-store" });
+        const j = await r.json();
+        if (!alive) return;
+        setItems(j.items ?? []);
+      } catch {
+        /* ignore */
+      } finally {
+        if (!alive) return;
+        if (first) {
+          setLoading(false);
+          first = false;
+        }
+      }
+    };
+
+    load(); // initial
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    const t = setInterval(load, 15000); // every 15s, so 86s reflect quickly
+
+    return () => {
+      alive = false;
+      window.removeEventListener("focus", onFocus);
+      clearInterval(t);
+    };
   }, []);
 
-  const filtered = useMemo(() => {
-    const s = q.trim().toLowerCase();
-    if (!s) return items;
-    return items.filter((it) =>
-      [it.name, it.description].filter(Boolean).some((v) => (v || "").toLowerCase().includes(s))
-    );
-  }, [items, q]);
-
-  // --- New: End Session button
+  // ---------- End session ----------
   function endSession() {
     try { localStorage.removeItem("kwik.table"); } catch {}
     router.replace("/start");
   }
 
-  // --- New: idle auto-return (15 min) ONLY if cart empty
+  // ---------- Idle auto-return (15 min) if cart empty ----------
   const { items: cartItems } = useCart();
   const lastActiveRef = useRef<number>(Date.now());
   useEffect(() => {
@@ -75,7 +92,7 @@ function MenuInner() {
     evs.forEach((e) => window.addEventListener(e, bump, { passive: true } as any));
     const t = setInterval(() => {
       const idleMs = Date.now() - lastActiveRef.current;
-      const canLeave = cartItems.length === 0; // safe if nothing in cart
+      const canLeave = cartItems.length === 0;
       if (canLeave && idleMs >= 15 * 60 * 1000) {
         endSession();
       }
@@ -84,9 +101,9 @@ function MenuInner() {
       evs.forEach((e) => window.removeEventListener(e, bump as any));
       clearInterval(t);
     };
-  }, [cartItems.length]); // re-evaluate when cart changes
+  }, [cartItems.length]);
 
-  // Optional: change table quickly
+  // ---------- Quick-change table ----------
   const changeTable = () => {
     const input = prompt("Enter table number");
     if (!input) return;
@@ -96,6 +113,55 @@ function MenuInner() {
     try { localStorage.setItem("kwik.table", String(n)); } catch {}
     router.replace(`/menu?table=${n}`);
   };
+
+  // ---------- Search filter ----------
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return items;
+    return items.filter((it) =>
+      [it.name, it.description, it.category]
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(s))
+    );
+  }, [items, q]);
+
+  // ---------- Grouping: stream → category ----------
+  const sections: Section[] = useMemo(() => {
+    const bucket = new Map<string, Section>();
+
+    const titleFor = (stream: string | null | undefined, category: string | null | undefined) => {
+      const sTitle = stream === "drinks" ? "Drinks" : "Food";
+      return category ? `${sTitle} — ${category}` : sTitle;
+    };
+
+    for (const it of filtered) {
+      const key = `${it.stream || "food"}::${it.category || ""}`;
+      if (!bucket.has(key)) {
+        bucket.set(key, {
+          key,
+          title: titleFor(it.stream as any, it.category as any),
+          items: [],
+        });
+      }
+      bucket.get(key)!.items.push(it);
+    }
+
+    // order: Food sections first, then Drinks; each by sort_order then name
+    const arr = Array.from(bucket.values());
+    arr.sort((a, b) => {
+      const sA = a.title.startsWith("Food") ? 0 : 1;
+      const sB = b.title.startsWith("Food") ? 0 : 1;
+      if (sA !== sB) return sA - sB;
+      return a.title.localeCompare(b.title);
+    });
+    for (const sec of arr) {
+      sec.items.sort((a, b) => {
+        const so = (a.sort_order ?? 0) - (b.sort_order ?? 0);
+        return so !== 0 ? so : a.name.localeCompare(b.name);
+      });
+    }
+    return arr;
+  }, [filtered]);
 
   return (
     <main className="mx-auto max-w-6xl px-4 pb-40">
@@ -114,14 +180,24 @@ function MenuInner() {
             Change
           </button>
         </div>
-        <button
-          type="button"
-          onClick={endSession}
-          className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-          title="Clear table and return to start"
-        >
-          End session
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => location.reload()}
+            className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+            title="Hard refresh menu"
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={endSession}
+            className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+            title="Clear table and return to start"
+          >
+            End session
+          </button>
+        </div>
       </header>
 
       {table != null ? (
@@ -135,13 +211,30 @@ function MenuInner() {
       )}
 
       <SearchBar value={q} onChange={setQ} />
-      <ul className="grid list-none p-0 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {loading
-          ? Array.from({ length: 6 }).map((_, i) => (
-              <li key={i} className="h-40 rounded-2xl bg-gray-100 animate-pulse" />
-            ))
-          : filtered.map((it) => <MenuItemCard key={String(it.id)} item={it} />)}
-      </ul>
+
+      {/* First-load skeleton */}
+      {loading ? (
+        <ul className="grid list-none p-0 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <li key={i} className="h-40 rounded-2xl bg-gray-100 animate-pulse" />
+          ))}
+        </ul>
+      ) : sections.length === 0 ? (
+        <div className="mt-6 text-sm text-gray-600">No matching items.</div>
+      ) : (
+        <div className="mt-2 space-y-8">
+          {sections.map((sec) => (
+            <section key={sec.key}>
+              <h2 className="mb-2 text-lg font-semibold">{sec.title}</h2>
+              <ul className="grid list-none p-0 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {sec.items.map((it) => (
+                  <MenuItemCard key={String(it.id)} item={it} />
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
+      )}
     </main>
   );
 }

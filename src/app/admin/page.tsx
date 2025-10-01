@@ -1,6 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  COLOR_CLASSES,
+  getOrderCardColor,
+  getTableSummaryColorAndLabel,
+  type TableOrderLite,
+} from "@/lib/adminColors";
 
 /* ===================== Types ===================== */
 type Ticket = {
@@ -59,6 +65,30 @@ type TableOrderItems = {
   items: { name: string; stream: "food" | "drinks" | null; qty: number; line_total: number }[];
 };
 
+/* Active-for-table API shapes we use */
+type OgRow = {
+  id: number;
+  order_code: string;
+  table_number: number | null;
+  created_at: string;
+  resolution_required: boolean;
+  closed_at: string | null;
+};
+type ActiveForTableResp = {
+  ok: boolean;
+  orders: OgRow[]; // active
+  active_orders: OgRow[];
+  recent_closed_orders: OgRow[];
+  summary: {
+    color: "white" | "orange" | "green" | "red" | "purple";
+    label: string;
+    active_count: number;
+    multiple: boolean;
+    has_issue: boolean;
+    lookback_mins?: number;
+  };
+};
+
 /* ===================== UI bits ===================== */
 function StatusPill({ s }: { s: string }) {
   const map: Record<string, string> = {
@@ -84,7 +114,6 @@ function StatusPill({ s }: { s: string }) {
 export default function AdminPage() {
   const [tab, setTab] = useState<"tables" | "orders" | "issues">("tables");
   const [q, setQ] = useState("");
-
   const [err, setErr] = useState<string | null>(null);
 
   /* -------- Orders & Issues (global lists) -------- */
@@ -162,6 +191,14 @@ export default function AdminPage() {
   const [summaries, setSummaries] = useState<TableSummary[]>([]);
   const [selectedTable, setSelectedTable] = useState<number | null>(null);
 
+  // active-for-table cache for the grid (map table -> API response)
+  const [tableColors, setTableColors] = useState<
+    Record<
+      number,
+      { color: ActiveForTableResp["summary"]["color"]; label: string; multiple: boolean }
+    >
+  >({});
+
   // Drawer sub-tabs
   const [drawerTab, setDrawerTab] = useState<"items" | "issues">("items");
 
@@ -170,6 +207,10 @@ export default function AdminPage() {
   const [tableItems, setTableItems] = useState<TableOrderItems[]>([]);
   const [loadingTbl, setLoadingTbl] = useState(false);
   const [loadingItems, setLoadingItems] = useState(false);
+
+  // For order-coloring in drawer
+  const [drawerActive, setDrawerActive] = useState<OgRow[]>([]);
+  const [drawerRecentClosed, setDrawerRecentClosed] = useState<OgRow[]>([]);
 
   async function loadTableSummaries() {
     try {
@@ -187,23 +228,79 @@ export default function AdminPage() {
     return () => clearInterval(t);
   }, []);
 
+  // Color prefetch for table cards (since max=10, this is fine)
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      const next: typeof tableColors = {};
+      await Promise.all(
+        summaries.map(async (s) => {
+          try {
+            const r = await fetch(`/api/orders/active-for-table?table=${s.table_number}`);
+            const j: ActiveForTableResp = await r.json();
+            if (!j?.ok) return;
+            next[s.table_number] = {
+              color: j.summary.color,
+              label: j.summary.label,
+              multiple: j.summary.multiple,
+            };
+          } catch {}
+        })
+      );
+      if (!cancel) setTableColors(next);
+    })();
+    return () => {
+      cancel = true;
+    };
+  }, [summaries]);
+
   async function openTable(tbl: number) {
     setSelectedTable(tbl);
     setDrawerTab("items");
     setLoadingTbl(true);
     setLoadingItems(true);
     try {
-      const [issuesRes, itemsRes] = await Promise.all([
+      const [issuesRes, itemsRes, actRes] = await Promise.all([
         fetch(`/api/admin/tables/issues?table=${tbl}`),
         fetch(`/api/admin/tables/items?table=${tbl}`),
+        fetch(`/api/orders/active-for-table?table=${tbl}`), // for colors in drawer
       ]);
-      const [issuesJson, itemsJson] = await Promise.all([issuesRes.json(), itemsRes.json()]);
+      const [issuesJson, itemsJson, actJson] = await Promise.all([
+        issuesRes.json(),
+        itemsRes.json(),
+        actRes.json(),
+      ]);
+
       if (issuesJson?.ok) setTableIssues(issuesJson.rows || []);
       if (itemsJson?.ok) setTableItems(itemsJson.rows || []);
+
+      if (actJson?.ok) {
+        setDrawerActive(actJson.active_orders || actJson.orders || []);
+        setDrawerRecentClosed(actJson.recent_closed_orders || []);
+      } else {
+        setDrawerActive([]);
+        setDrawerRecentClosed([]);
+      }
     } finally {
       setLoadingTbl(false);
       setLoadingItems(false);
     }
+  }
+
+  function colorForDrawerOrder(order_code: string): keyof typeof COLOR_CLASSES {
+    // find in active → orange/red; in recentClosed → green; else white
+    const a = drawerActive.find((o) => o.order_code === order_code);
+    if (a) {
+      const lite: TableOrderLite = {
+        order_code: a.order_code,
+        closed_at: a.closed_at,
+        resolution_required: a.resolution_required,
+      };
+      return getOrderCardColor(lite);
+    }
+    const c = drawerRecentClosed.find((o) => o.order_code === order_code);
+    if (c) return "green";
+    return "white";
   }
 
   /* ===================== Render ===================== */
@@ -215,6 +312,10 @@ export default function AdminPage() {
           <a href="/kitchen" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Kitchen</a>
           <a href="/bar" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Bar</a>
           <a href="/runner" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Runner</a>
+          <a href="/admin/menu" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">
+  Menu
+</a>
+
         </div>
       </header>
 
@@ -264,39 +365,51 @@ export default function AdminPage() {
       {/* ========== Tables tab ========== */}
       {tab === "tables" && (
         <section>
+          <div className="mb-2 text-xs text-gray-500">
+            Legend:&nbsp;
+            <span className={`inline-flex items-center rounded-full border px-2 py-0.5 mr-1 ${COLOR_CLASSES.white}`}>No orders</span>
+            <span className={`inline-flex items-center rounded-full border px-2 py-0.5 mr-1 ${COLOR_CLASSES.orange}`}>Order present</span>
+            <span className={`inline-flex items-center rounded-full border px-2 py-0.5 mr-1 ${COLOR_CLASSES.purple}`}>Multiple orders</span>
+            <span className={`inline-flex items-center rounded-full border px-2 py-0.5 mr-1 ${COLOR_CLASSES.red}`}>Order issue</span>
+            <span className={`inline-flex items-center rounded-full border px-2 py-0.5 ${COLOR_CLASSES.green}`}>Orders solved</span>
+          </div>
+
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-            {summaries.map((s) => (
-              <button
-                key={s.table_number}
-                onClick={() => openTable(s.table_number)}
-                className={`text-left rounded-2xl border p-4 bg-white hover:shadow transition ${
-                  s.has_issue ? "border-amber-300 bg-amber-50" : ""
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold">Table {s.table_number}</div>
-                  {s.has_issue && (
-                    <span className="text-xs rounded-full border border-amber-300 bg-amber-100 text-amber-900 px-2 py-0.5">
-                      Issue
+            {summaries.map((s) => {
+              const tState = tableColors[s.table_number] || { color: "white" as const, label: "No orders", multiple: false };
+              const colorClass = COLOR_CLASSES[tState.color];
+              // If multiple active, show 'Multiple' instead of a single code
+              const currentDisplay =
+                tState.multiple ? "Multiple" : s.current_order_code ?? "—";
+              return (
+                <button
+                  key={s.table_number}
+                  onClick={() => openTable(s.table_number)}
+                  className={`text-left rounded-2xl border p-4 hover:shadow transition ${colorClass}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold">Table {s.table_number}</div>
+                    <span className="text-xs rounded-full border px-2 py-0.5">
+                      {tState.label}
                     </span>
-                  )}
-                </div>
-                <div className="mt-2 text-sm grid gap-1">
-                  <div>
-                    Today’s orders: <span className="font-semibold">{s.orders_count}</span>
                   </div>
-                  <div>
-                    Items total: <span className="font-semibold">{s.items_count}</span>
+                  <div className="mt-2 text-sm grid gap-1">
+                    <div>
+                      Today’s orders: <span className="font-semibold">{s.orders_count}</span>
+                    </div>
+                    <div>
+                      Items total: <span className="font-semibold">{s.items_count}</span>
+                    </div>
+                    <div className="text-gray-700">
+                      Current order: <span className="font-mono">{currentDisplay}</span>
+                    </div>
+                    <div className="text-gray-900">
+                      Revenue today: <span className="font-semibold">K {s.revenue.toFixed(2)}</span>
+                    </div>
                   </div>
-                  <div className="text-gray-600">
-                    Current order: <span className="font-mono">{s.current_order_code ?? "—"}</span>
-                  </div>
-                  <div className="text-gray-900">
-                    Revenue today: <span className="font-semibold">K {s.revenue.toFixed(2)}</span>
-                  </div>
-                </div>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
 
           {/* Drill-down drawer */}
@@ -338,33 +451,45 @@ export default function AdminPage() {
                       <div className="rounded-lg border p-3 text-sm text-gray-600">No orders for today.</div>
                     ) : (
                       <div className="grid gap-3">
-                        {tableItems.map((ord) => (
-                          <div key={ord.order_code} className="rounded-xl border p-4 bg-white">
-                            <div className="flex items-center justify-between">
-                              <div className="font-semibold">
-                                <span className="text-gray-500">Order</span>{" "}
-                                <span className="font-mono">{ord.order_code}</span>
+                        {tableItems.map((ord) => {
+                          const colorKey = colorForDrawerOrder(ord.order_code);
+                          const colorClass = COLOR_CLASSES[colorKey];
+                          return (
+                            <div key={ord.order_code} className={`rounded-xl border p-4 ${colorClass}`}>
+                              <div className="flex items-center justify-between">
+                                <div className="font-semibold">
+                                  <span className="text-gray-600">Order</span>{" "}
+                                  <span className="font-mono">{ord.order_code}</span>
+                                </div>
+                                <div className="text-sm">
+                                  Total: <span className="font-semibold">K {ord.total.toFixed(2)}</span>
+                                </div>
                               </div>
-                              <div className="text-sm">
-                                Total: <span className="font-semibold">K {ord.total.toFixed(2)}</span>
+                              <ul className="mt-2 space-y-1 text-sm">
+                                {ord.items.map((it, idx) => (
+                                  <li key={idx} className="flex items-center justify-between">
+                                    <div>
+                                      <span className="capitalize">{it.stream ?? "—"}</span>
+                                      {" • "}
+                                      <span className="font-medium">{it.name}</span>
+                                      {" × "}
+                                      <span>{it.qty}</span>
+                                    </div>
+                                    <div className="font-semibold">K {it.line_total.toFixed(2)}</div>
+                                  </li>
+                                ))}
+                              </ul>
+                              <div className="mt-3">
+                                <a
+                                  href={`/status/${encodeURIComponent(ord.order_code)}`}
+                                  className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
+                                >
+                                  Open status
+                                </a>
                               </div>
                             </div>
-                            <ul className="mt-2 space-y-1 text-sm">
-                              {ord.items.map((it, idx) => (
-                                <li key={idx} className="flex items-center justify-between">
-                                  <div>
-                                    <span className="capitalize">{it.stream ?? "—"}</span>
-                                    {" • "}
-                                    <span className="font-medium">{it.name}</span>
-                                    {" × "}
-                                    <span>{it.qty}</span>
-                                  </div>
-                                  <div className="font-semibold">K {it.line_total.toFixed(2)}</div>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>

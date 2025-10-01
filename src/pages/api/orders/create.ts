@@ -10,7 +10,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const { table_number, items } = req.body ?? {};
     const tableNum = Number(table_number);
-    if (!Number.isFinite(tableNum)) {
+    if (!Number.isFinite(tableNum) || tableNum <= 0) {
       return res.status(400).json({ ok: false, error: "table_number must be numeric" });
     }
     if (!Array.isArray(items) || items.length === 0) {
@@ -34,31 +34,35 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     const toNumber = (v: any, fallback = 0) => {
       if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
-      // strip currency symbols/spaces (e.g., "K 365.00")
       const n = Number.parseFloat(String(v).replace(/[^0-9.]/g, ""));
       return Number.isFinite(n) ? n : fallback;
     };
 
-    // Sanitize cart items for the SQL function
-    const safeItems = items.map((it: any) => ({
-      // IMPORTANT: id must be digits-only; otherwise set to empty string
-      id: isDigits(it?.id) ? String(it.id) : "",
-      // stream must be "food" | "drinks" (default to "food" if missing)
-      stream: it?.stream === "drinks" ? "drinks" : "food",
-      name: it?.name ? String(it.name) : "(unnamed)",
-      qty: toInt(it?.qty, 1),
-      price: toNumber(it?.price, 0), // your SQL casts elem->>'price'::numeric
-    }));
+    // IMPORTANT: fall back to baseId when id is synthetic
+    const safeItems = items.map((it: any) => {
+      const idOut =
+        isDigits(it?.id) ? String(it.id)
+        : isDigits(it?.baseId) ? String(it.baseId)
+        : ""; // will become NULL in SQL
 
-    // Call your SQL function (returns table(order_code text))
+      return {
+        id: idOut,
+        stream: it?.stream === "drinks" ? "drinks" : "food",
+        name: it?.name ? String(it.name) : "(unnamed)",
+        qty: toInt(it?.qty, 1),
+        price: toNumber(it?.price, 0),
+        // optional passthroughs (SQL currently ignores but safe to include)
+        notes: it?.notes ? String(it.notes) : null,
+      };
+    });
+
     const { data, error } = await supa.rpc("create_order_with_items", {
       p_table_number: tableNum,
-      p_items: safeItems, // JSONB on the SQL side
+      p_items: safeItems, // JSONB
     });
 
     if (error) return res.status(500).json({ ok: false, error: error.message });
 
-    // Supabase RPC can return either an array of rows or a single row
     const order_code =
       (Array.isArray(data) ? data[0]?.order_code : (data as any)?.order_code) ?? null;
 
