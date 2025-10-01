@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   COLOR_CLASSES,
   getOrderCardColor,
@@ -45,8 +46,8 @@ type TableSummary = {
   items_count: number;
   current_order_code: string | null;
   has_issue: boolean;
-  revenue: number;            // K (ZMW) — legacy
-  revenue_today?: number;     // K (preferred by newer API)
+  revenue: number;            // legacy
+  revenue_today?: number;     // preferred
 };
 
 type TableIssue = {
@@ -77,7 +78,7 @@ type OgRow = {
 };
 type ActiveForTableResp = {
   ok: boolean;
-  orders: OgRow[]; // active
+  orders: OgRow[];
   active_orders: OgRow[];
   recent_closed_orders: OgRow[];
   summary: {
@@ -113,6 +114,8 @@ function StatusPill({ s }: { s: string }) {
 
 /* ===================== Page ===================== */
 export default function AdminPage() {
+  const router = useRouter();
+
   const [tab, setTab] = useState<"tables" | "orders" | "issues">("tables");
   const [q, setQ] = useState("");
   const [err, setErr] = useState<string | null>(null);
@@ -192,35 +195,24 @@ export default function AdminPage() {
   const [summaries, setSummaries] = useState<TableSummary[]>([]);
   const [selectedTable, setSelectedTable] = useState<number | null>(null);
 
-  // active-for-table cache for the grid (map table -> API response)
   const [tableColors, setTableColors] = useState<
-    Record<
-      number,
-      { color: ActiveForTableResp["summary"]["color"]; label: string; multiple: boolean }
-    >
+    Record<number, { color: ActiveForTableResp["summary"]["color"]; label: string; multiple: boolean }>
   >({});
 
-  // Drawer sub-tabs
   const [drawerTab, setDrawerTab] = useState<"items" | "issues">("items");
-
-  // Drawer data
   const [tableIssues, setTableIssues] = useState<TableIssue[]>([]);
   const [tableItems, setTableItems] = useState<TableOrderItems[]>([]);
   const [loadingTbl, setLoadingTbl] = useState(false);
   const [loadingItems, setLoadingItems] = useState(false);
-
-  // For order-coloring in drawer
   const [drawerActive, setDrawerActive] = useState<OgRow[]>([]);
   const [drawerRecentClosed, setDrawerRecentClosed] = useState<OgRow[]>([]);
 
   async function loadTableSummaries() {
     try {
       const r = await fetch("/api/admin/tables/summary?max=10");
-      const j = await r.json();
+    const j = await r.json();
       if (j?.ok) setSummaries(j.rows || []);
-    } catch {
-      /* ignore; top banner already shows global errors */
-    }
+    } catch {}
   }
 
   useEffect(() => {
@@ -229,7 +221,6 @@ export default function AdminPage() {
     return () => clearInterval(t);
   }, []);
 
-  // Color prefetch for table cards (since max=10, this is fine)
   useEffect(() => {
     let cancel = false;
     (async () => {
@@ -264,7 +255,7 @@ export default function AdminPage() {
       const [issuesRes, itemsRes, actRes] = await Promise.all([
         fetch(`/api/admin/tables/issues?table=${tbl}`),
         fetch(`/api/admin/tables/items?table=${tbl}`),
-        fetch(`/api/orders/active-for-table?table=${tbl}`), // for colors in drawer
+        fetch(`/api/orders/active-for-table?table=${tbl}`),
       ]);
       const [issuesJson, itemsJson, actJson] = await Promise.all([
         issuesRes.json(),
@@ -289,7 +280,6 @@ export default function AdminPage() {
   }
 
   function colorForDrawerOrder(order_code: string): keyof typeof COLOR_CLASSES {
-    // find in active → orange/red; in recentClosed → green; else white
     const a = drawerActive.find((o) => o.order_code === order_code);
     if (a) {
       const lite: TableOrderLite = {
@@ -304,6 +294,32 @@ export default function AdminPage() {
     return "white";
   }
 
+  /* -------- Report modal (global) -------- */
+  const [showReport, setShowReport] = useState(false);
+  const [reportScope, setReportScope] = useState<"table" | "total">("table");
+  const [reportTable, setReportTable] = useState<number | null>(null);
+  const [reportDays, setReportDays] = useState<number>(1);
+
+  function openReportPrompt(defaultTable?: number) {
+    setReportScope("table");
+    setReportTable(defaultTable ?? (selectedTable ?? summaries[0]?.table_number ?? null));
+    setReportDays(1);
+    setShowReport(true);
+  }
+
+  function goToReport() {
+    setShowReport(false);
+    if (reportScope === "total") {
+      router.push(`/admin/reports/total?days=${reportDays}`);
+    } else {
+      if (!reportTable) {
+        alert("Pick a table");
+        return;
+      }
+      router.push(`/admin/tables/${reportTable}/report?days=${reportDays}`);
+    }
+  }
+
   /* ===================== Render ===================== */
   return (
     <main className="mx-auto max-w-6xl p-6">
@@ -314,6 +330,12 @@ export default function AdminPage() {
           <a href="/bar" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Bar</a>
           <a href="/runner" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Runner</a>
           <a href="/admin/menu" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Menu</a>
+          <button
+            className="text-sm rounded-lg border px-3 py-2 bg-red-600 text-white hover:bg-red-700 border-red-600"
+            onClick={() => openReportPrompt()}
+          >
+            Report
+          </button>
         </div>
       </header>
 
@@ -377,7 +399,7 @@ export default function AdminPage() {
               const tState = tableColors[s.table_number] || { color: "white" as const, label: "No orders", multiple: false };
               const colorClass = COLOR_CLASSES[tState.color];
               const currentDisplay = tState.multiple ? "Multiple" : s.current_order_code ?? "—";
-              const revenueK = Number(s.revenue_today ?? s.revenue ?? 0); // ← robust
+              const revenueK = Number(s.revenue_today ?? s.revenue ?? 0);
               return (
                 <button
                   key={s.table_number}
@@ -650,6 +672,111 @@ export default function AdminPage() {
             ))
           )}
         </section>
+      )}
+
+      {/* ===== Report Modal ===== */}
+      {showReport && (
+        <div className="fixed inset-0 z-50 bg-black/40 overflow-y-auto">
+          <div className="min-h-full flex items-start justify-center p-4">
+            <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-lg">
+              <div className="flex items-center justify-between">
+                <div className="text-lg font-semibold">Build a report</div>
+                <button
+                  className="rounded-lg border px-3 py-1 text-sm hover:bg-gray-50"
+                  onClick={() => setShowReport(false)}
+                >
+                  Close
+                </button>
+              </div>
+
+              <div className="mt-4 grid gap-4">
+                {/* Scope */}
+                <div className="grid gap-2 text-sm">
+                  <span className="text-gray-600">Scope</span>
+                  <div className="inline-flex rounded-xl border p-1">
+                    <button
+                      className={`px-3 py-1 text-sm rounded-lg ${reportScope === "table" ? "bg-black text-white" : ""}`}
+                      onClick={() => setReportScope("table")}
+                    >
+                      Table
+                    </button>
+                    <button
+                      className={`px-3 py-1 text-sm rounded-lg ${reportScope === "total" ? "bg-black text-white" : ""}`}
+                      onClick={() => setReportScope("total")}
+                    >
+                      Total sales
+                    </button>
+                  </div>
+                </div>
+
+                {/* Table picker (only if table scope) */}
+                {reportScope === "table" && (
+                  <label className="grid gap-1 text-sm">
+                    <span className="text-gray-600">Table</span>
+                    <select
+                      className="rounded-lg border px-3 py-2"
+                      value={reportTable ?? ""}
+                      onChange={(e) =>
+                        setReportTable(e.target.value ? Number(e.target.value) : null)
+                      }
+                    >
+                      <option value="" disabled>Select a table…</option>
+                      {summaries.map((s) => (
+                        <option key={s.table_number} value={s.table_number}>
+                          Table {s.table_number}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+
+                {/* Range */}
+                <div className="grid gap-2 text-sm">
+                  <span className="text-gray-600">Range</span>
+                  <div className="inline-flex rounded-xl border p-1">
+                    {[1, 7, 30].map((d) => (
+                      <button
+                        key={d}
+                        className={`px-3 py-1 text-sm rounded-lg ${reportDays === d ? "bg-black text-white" : ""}`}
+                        onClick={() => setReportDays(d)}
+                      >
+                        {d}d
+                      </button>
+                    ))}
+                    <button
+                      className="px-3 py-1 text-sm rounded-lg"
+                      onClick={() => {
+                        const v = prompt("Custom days (1-30):", String(reportDays));
+                        const n = Number(v);
+                        if (Number.isFinite(n) && n >= 1 && n <= 30) {
+                          setReportDays(n);
+                        }
+                      }}
+                    >
+                      …
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    className="rounded-lg border px-3 py-2 text-sm"
+                    onClick={() => setShowReport(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded-lg bg-black text-white px-3 py-2 text-sm disabled:opacity-60"
+                    disabled={reportScope === "table" && !reportTable}
+                    onClick={goToReport}
+                  >
+                    Open report
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </main>
   );
