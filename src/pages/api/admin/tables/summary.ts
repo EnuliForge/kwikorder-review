@@ -1,3 +1,4 @@
+// src/pages/api/admin/table/summary.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js";
 
@@ -12,63 +13,105 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       { auth: { persistSession: false } }
     );
 
-    // today (server time)
+    // === Time window for "today" stats (local server time)
     const now = new Date();
     const start = new Date(now); start.setHours(0, 0, 0, 0);
     const end = new Date(now);   end.setHours(23, 59, 59, 999);
 
-    // 1) today’s order_groups for these tables
-    const { data: ogRows, error: ogErr } = await supa
+    // ------------------------------------------------------------
+    // 1) Today's orders (for items_count/revenue "today" KPIs)
+    // ------------------------------------------------------------
+    const { data: ogToday, error: ogTodayErr } = await supa
       .from("order_groups")
       .select("id, table_number, order_code, created_at, closed_at")
       .in("table_number", tables)
       .gte("created_at", start.toISOString())
       .lte("created_at", end.toISOString());
 
-    if (ogErr) return res.status(500).json({ ok: false, error: ogErr.message });
+    if (ogTodayErr) return res.status(500).json({ ok: false, error: ogTodayErr.message });
 
-    const byTbl = new Map<number, {
-      ogIds: number[];
-      ordersCount: number;
+    type Bucket = {
+      ogTodayIds: number[];
+      ordersCountToday: number;
+      // we'll fill these after we fetch active rows
+      activeOrderCodes: string[];
+      activeOgIds: number[];
       currentOpen?: { code: string; created_at: string };
-    }>();
-    for (const t of tables) byTbl.set(t, { ogIds: [], ordersCount: 0 });
+    };
 
-    for (const og of ogRows || []) {
+    const byTbl = new Map<number, Bucket>();
+    for (const t of tables) {
+      byTbl.set(t, {
+        ogTodayIds: [],
+        ordersCountToday: 0,
+        activeOrderCodes: [],
+        activeOgIds: [],
+      });
+    }
+
+    for (const og of ogToday || []) {
       const tbl = (og as any).table_number as number | null;
       if (!tbl || !byTbl.has(tbl)) continue;
       const b = byTbl.get(tbl)!;
-      b.ogIds.push((og as any).id);
-      b.ordersCount += 1;
-      if ((og as any).closed_at == null) {
-        const prev = b.currentOpen;
-        if (!prev || new Date((og as any).created_at).getTime() > new Date(prev.created_at).getTime()) {
-          b.currentOpen = { code: (og as any).order_code, created_at: (og as any).created_at };
-        }
+      b.ogTodayIds.push((og as any).id);
+      b.ordersCountToday += 1;
+    }
+
+    // ------------------------------------------------------------
+    // 2) Active (open) orders — NO date filter (for multi-open support)
+    // ------------------------------------------------------------
+    const { data: ogActive, error: ogActiveErr } = await supa
+      .from("order_groups")
+      .select("id, table_number, order_code, created_at")
+      .in("table_number", tables)
+      .is("closed_at", null)
+      .order("created_at", { ascending: false });
+
+    if (ogActiveErr) return res.status(500).json({ ok: false, error: ogActiveErr.message });
+
+    for (const og of ogActive || []) {
+      const tbl = (og as any).table_number as number | null;
+      if (!tbl || !byTbl.has(tbl)) continue;
+      const b = byTbl.get(tbl)!;
+      b.activeOgIds.push((og as any).id);
+      b.activeOrderCodes.push(String((og as any).order_code));
+
+      // Track most-recent open order as "current_open" (back-compat)
+      const prev = b.currentOpen;
+      const thisTime = new Date((og as any).created_at).getTime();
+      if (!prev || thisTime > new Date(prev.created_at).getTime()) {
+        b.currentOpen = { code: (og as any).order_code, created_at: (og as any).created_at };
       }
     }
 
-    const allOgIds = Array.from(byTbl.values()).flatMap(v => v.ogIds);
+    // Convenience maps
+    const allOgTodayIds = Array.from(byTbl.values()).flatMap(v => v.ogTodayIds);
+    const allOgActiveIds = Array.from(byTbl.values()).flatMap(v => v.activeOgIds);
 
-    // 2) tickets -> map ticket -> table
-    let tickets: any[] = [];
-    if (allOgIds.length) {
+    // ------------------------------------------------------------
+    // 3) tickets -> map ticket -> table (for today's KPIs)
+    // ------------------------------------------------------------
+    let ticketsToday: any[] = [];
+    if (allOgTodayIds.length) {
       const { data: tRows, error: tErr } = await supa
         .from("tickets")
         .select("id, order_group_id")
-        .in("order_group_id", allOgIds);
+        .in("order_group_id", allOgTodayIds);
       if (tErr) return res.status(500).json({ ok: false, error: tErr.message });
-      tickets = tRows || [];
+      ticketsToday = tRows || [];
     }
-    const ogToTbl = new Map<number, number>();
-    for (const [tbl, b] of byTbl.entries()) for (const ogId of b.ogIds) ogToTbl.set(ogId, tbl);
 
-    // 3) line items -> sum qty + revenue per table
+    const ogTodayToTbl = new Map<number, number>();
+    for (const [tbl, b] of byTbl.entries()) {
+      for (const ogId of b.ogTodayIds) ogTodayToTbl.set(ogId, tbl);
+    }
+
+    // 3b) line items -> sum qty + revenue per table (today only)
     const itemsCountByTbl = new Map<number, number>();
     const revenueByTbl = new Map<number, number>(); // numeric sum (K)
 
-    if (tickets.length) {
-      const ticketIds = tickets.map((r: any) => r.id);
+    if (ticketsToday.length) {
+      const ticketIds = ticketsToday.map((r: any) => r.id);
       const { data: li, error: liErr } = await supa
         .from("ticket_line_items")
         .select("ticket_id, qty, unit_price")
@@ -76,7 +119,9 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       if (liErr) return res.status(500).json({ ok: false, error: liErr.message });
 
       const ticketToTbl = new Map<number, number>();
-      for (const t of tickets) ticketToTbl.set((t as any).id, ogToTbl.get((t as any).order_group_id)!);
+      for (const t of ticketsToday) {
+        ticketToTbl.set((t as any).id, ogTodayToTbl.get((t as any).order_group_id)!);
+      }
 
       for (const r of li || []) {
         const tbl = ticketToTbl.get((r as any).ticket_id);
@@ -88,32 +133,54 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       }
     }
 
-    // 4) unresolved issues on today’s orders -> flag per table
+    // ------------------------------------------------------------
+    // 4) unresolved issues -> flag per table (check ACTIVE orders)
+    // ------------------------------------------------------------
     const hasIssueByTbl = new Map<number, boolean>();
-    if (allOgIds.length) {
+    if (allOgActiveIds.length) {
       const { data: iss, error: iErr } = await supa
         .from("issues")
         .select("order_group_id, status")
-        .in("order_group_id", allOgIds)
+        .in("order_group_id", allOgActiveIds)
         .neq("status", "resolved");
       if (iErr) return res.status(500).json({ ok: false, error: iErr.message });
 
+      // Build a quick lookup: active og id -> table
+      const ogActiveToTbl = new Map<number, number>();
+      for (const [tbl, b] of byTbl.entries()) {
+        for (const ogId of b.activeOgIds) ogActiveToTbl.set(ogId, tbl);
+      }
+
       for (const r of iss || []) {
-        const tbl = ogToTbl.get((r as any).order_group_id);
+        const tbl = ogActiveToTbl.get((r as any).order_group_id);
         if (!tbl) continue;
         hasIssueByTbl.set(tbl, true);
       }
     }
 
+    // ------------------------------------------------------------
+    // 5) Final rows
+    // ------------------------------------------------------------
     const rows = tables.map(tbl => {
       const b = byTbl.get(tbl)!;
+      const activeCount = b.activeOrderCodes.length;
+
       return {
         table_number: tbl,
-        orders_count: b.ordersCount,
-        items_count: itemsCountByTbl.get(tbl) || 0,
-        current_order_code: b.currentOpen?.code || null,
+
+        // Active/open orders (no date filter)
+        active_count: activeCount,
+        active_order_codes: b.activeOrderCodes,     // NEW
+        current_order_code: b.currentOpen?.code || null, // kept for back-compat
         has_issue: !!hasIssueByTbl.get(tbl),
-        revenue: Number(revenueByTbl.get(tbl) || 0), // K value
+
+        // Today's stats
+        orders_count_today: b.ordersCountToday,
+        items_count_today: itemsCountByTbl.get(tbl) || 0,
+        revenue_today: Number(revenueByTbl.get(tbl) || 0), // K value
+
+        // Handy link for printing (you built this page)
+        report_url: `/admin/tables/${tbl}/report?days=1`,
       };
     });
 

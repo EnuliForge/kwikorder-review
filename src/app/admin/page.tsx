@@ -1,10 +1,10 @@
+// src/app/admin/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import {
   COLOR_CLASSES,
   getOrderCardColor,
-  getTableSummaryColorAndLabel,
   type TableOrderLite,
 } from "@/lib/adminColors";
 
@@ -45,7 +45,8 @@ type TableSummary = {
   items_count: number;
   current_order_code: string | null;
   has_issue: boolean;
-  revenue: number; // K (ZMW)
+  revenue: number;            // K (ZMW) — legacy
+  revenue_today?: number;     // K (preferred by newer API)
 };
 
 type TableIssue = {
@@ -312,10 +313,7 @@ export default function AdminPage() {
           <a href="/kitchen" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Kitchen</a>
           <a href="/bar" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Bar</a>
           <a href="/runner" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Runner</a>
-          <a href="/admin/menu" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">
-  Menu
-</a>
-
+          <a href="/admin/menu" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Menu</a>
         </div>
       </header>
 
@@ -378,9 +376,8 @@ export default function AdminPage() {
             {summaries.map((s) => {
               const tState = tableColors[s.table_number] || { color: "white" as const, label: "No orders", multiple: false };
               const colorClass = COLOR_CLASSES[tState.color];
-              // If multiple active, show 'Multiple' instead of a single code
-              const currentDisplay =
-                tState.multiple ? "Multiple" : s.current_order_code ?? "—";
+              const currentDisplay = tState.multiple ? "Multiple" : s.current_order_code ?? "—";
+              const revenueK = Number(s.revenue_today ?? s.revenue ?? 0); // ← robust
               return (
                 <button
                   key={s.table_number}
@@ -404,7 +401,7 @@ export default function AdminPage() {
                       Current order: <span className="font-mono">{currentDisplay}</span>
                     </div>
                     <div className="text-gray-900">
-                      Revenue today: <span className="font-semibold">K {s.revenue.toFixed(2)}</span>
+                      Revenue today: <span className="font-semibold">K {revenueK.toFixed(2)}</span>
                     </div>
                   </div>
                 </button>
@@ -412,121 +409,141 @@ export default function AdminPage() {
             })}
           </div>
 
-          {/* Drill-down drawer */}
+          {/* Drill-down drawer (scrollable) */}
           {selectedTable !== null && (
-            <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50">
-              <div className="bg-white w-full sm:w-[680px] rounded-t-2xl sm:rounded-2xl p-5">
-                <div className="flex items-center justify-between">
+            <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-50 p-3">
+              <div className="bg-white w-full sm:w-[700px] rounded-t-2xl sm:rounded-2xl flex flex-col max-h-[85vh]">
+                {/* Header */}
+                <div className="flex items-center justify-between border-b px-5 py-3">
                   <div className="text-lg font-semibold">Table {selectedTable} — details</div>
-                  <button
-                    className="text-sm rounded-lg border px-3 py-1 hover:bg-gray-50"
-                    onClick={() => setSelectedTable(null)}
-                  >
-                    Close
-                  </button>
+                  <div className="flex gap-2">
+                    <a
+                      href={`/status/table/${selectedTable}`}
+                      className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
+                    >
+                      View table status
+                    </a>
+                    <a
+                      href={`/admin/tables/${selectedTable}/report?days=1`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
+                    >
+                      Print report
+                    </a>
+                    <button
+                      className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
+                      onClick={() => setSelectedTable(null)}
+                    >
+                      Close
+                    </button>
+                  </div>
                 </div>
 
-                {/* Sub-tabs */}
-                <div className="mt-3 inline-flex rounded-xl border p-1">
-                  <button
-                    className={`px-3 py-1 text-sm rounded-lg ${drawerTab === "items" ? "bg-black text-white" : ""}`}
-                    onClick={() => setDrawerTab("items")}
-                  >
-                    Items
-                  </button>
-                  <button
-                    className={`px-3 py-1 text-sm rounded-lg ${drawerTab === "issues" ? "bg-black text-white" : ""}`}
-                    onClick={() => setDrawerTab("issues")}
-                  >
-                    Issues
-                  </button>
-                </div>
+                {/* Body (scrolls) */}
+                <div className="overflow-y-auto px-5 py-4">
+                  {/* Sub-tabs */}
+                  <div className="inline-flex rounded-xl border p-1">
+                    <button
+                      className={`px-3 py-1 text-sm rounded-lg ${drawerTab === "items" ? "bg-black text-white" : ""}`}
+                      onClick={() => setDrawerTab("items")}
+                    >
+                      Items
+                    </button>
+                    <button
+                      className={`px-3 py-1 text-sm rounded-lg ${drawerTab === "issues" ? "bg-black text-white" : ""}`}
+                      onClick={() => setDrawerTab("issues")}
+                    >
+                      Issues
+                    </button>
+                  </div>
 
-                {/* Items tab */}
-                {drawerTab === "items" && (
-                  <div className="mt-4">
-                    {loadingItems ? (
-                      <div className="text-sm text-gray-600">Loading…</div>
-                    ) : tableItems.length === 0 ? (
-                      <div className="rounded-lg border p-3 text-sm text-gray-600">No orders for today.</div>
-                    ) : (
-                      <div className="grid gap-3">
-                        {tableItems.map((ord) => {
-                          const colorKey = colorForDrawerOrder(ord.order_code);
-                          const colorClass = COLOR_CLASSES[colorKey];
-                          return (
-                            <div key={ord.order_code} className={`rounded-xl border p-4 ${colorClass}`}>
+                  {/* Items tab */}
+                  {drawerTab === "items" && (
+                    <div className="mt-4">
+                      {loadingItems ? (
+                        <div className="text-sm text-gray-600">Loading…</div>
+                      ) : tableItems.length === 0 ? (
+                        <div className="rounded-lg border p-3 text-sm text-gray-600">No orders for today.</div>
+                      ) : (
+                        <div className="grid gap-3">
+                          {tableItems.map((ord) => {
+                            const colorKey = colorForDrawerOrder(ord.order_code);
+                            const colorClass = COLOR_CLASSES[colorKey];
+                            return (
+                              <div key={ord.order_code} className={`rounded-xl border p-4 ${colorClass}`}>
+                                <div className="flex items-center justify-between">
+                                  <div className="font-semibold">
+                                    <span className="text-gray-600">Order</span>{" "}
+                                    <span className="font-mono">{ord.order_code}</span>
+                                  </div>
+                                  <div className="text-sm">
+                                    Total: <span className="font-semibold">K {ord.total.toFixed(2)}</span>
+                                  </div>
+                                </div>
+                                <ul className="mt-2 space-y-1 text-sm">
+                                  {ord.items.map((it, idx) => (
+                                    <li key={idx} className="flex items-center justify-between">
+                                      <div>
+                                        <span className="capitalize">{it.stream ?? "—"}</span>
+                                        {" • "}
+                                        <span className="font-medium">{it.name}</span>
+                                        {" × "}
+                                        <span>{it.qty}</span>
+                                      </div>
+                                      <div className="font-semibold">K {it.line_total.toFixed(2)}</div>
+                                    </li>
+                                  ))}
+                                </ul>
+                                <div className="mt-3">
+                                  <a
+                                    href={`/status?code=${encodeURIComponent(ord.order_code)}`}
+                                    className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
+                                  >
+                                    Open status
+                                  </a>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Issues tab */}
+                  {drawerTab === "issues" && (
+                    <div className="mt-4">
+                      {loadingTbl ? (
+                        <div className="text-sm text-gray-600">Loading…</div>
+                      ) : tableIssues.length === 0 ? (
+                        <div className="rounded-lg border p-3 text-sm text-gray-600">No unresolved issues.</div>
+                      ) : (
+                        <ul className="space-y-2">
+                          {tableIssues.map((it) => (
+                            <li key={it.id} className="rounded-lg border px-3 py-2">
                               <div className="flex items-center justify-between">
-                                <div className="font-semibold">
-                                  <span className="text-gray-600">Order</span>{" "}
-                                  <span className="font-mono">{ord.order_code}</span>
-                                </div>
                                 <div className="text-sm">
-                                  Total: <span className="font-semibold">K {ord.total.toFixed(2)}</span>
+                                  <span className="font-mono">{it.order_code}</span> •{" "}
+                                  <span className="capitalize">{it.stream ?? "—"}</span>
                                 </div>
+                                <StatusPill s={it.status} />
                               </div>
-                              <ul className="mt-2 space-y-1 text-sm">
-                                {ord.items.map((it, idx) => (
-                                  <li key={idx} className="flex items-center justify-between">
-                                    <div>
-                                      <span className="capitalize">{it.stream ?? "—"}</span>
-                                      {" • "}
-                                      <span className="font-medium">{it.name}</span>
-                                      {" × "}
-                                      <span>{it.qty}</span>
-                                    </div>
-                                    <div className="font-semibold">K {it.line_total.toFixed(2)}</div>
-                                  </li>
-                                ))}
-                              </ul>
-                              <div className="mt-3">
-                                <a
-                                  href={`/status/${encodeURIComponent(ord.order_code)}`}
-                                  className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
-                                >
-                                  Open status
-                                </a>
+                              <div className="text-sm mt-1">
+                                <span className="capitalize">
+                                  {(it.type || "").replace("_", " ") || "Issue"}
+                                </span>
+                                {it.description ? (
+                                  <> — <span className="text-gray-700">{it.description}</span></>
+                                ) : null}
                               </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Issues tab */}
-                {drawerTab === "issues" && (
-                  <div className="mt-4">
-                    {loadingTbl ? (
-                      <div className="text-sm text-gray-600">Loading…</div>
-                    ) : tableIssues.length === 0 ? (
-                      <div className="rounded-lg border p-3 text-sm text-gray-600">No unresolved issues.</div>
-                    ) : (
-                      <ul className="space-y-2">
-                        {tableIssues.map((it) => (
-                          <li key={it.id} className="rounded-lg border px-3 py-2">
-                            <div className="flex items-center justify-between">
-                              <div className="text-sm">
-                                <span className="font-mono">{it.order_code}</span> •{" "}
-                                <span className="capitalize">{it.stream ?? "—"}</span>
-                              </div>
-                              <StatusPill s={it.status} />
-                            </div>
-                            <div className="text-sm mt-1">
-                              <span className="capitalize">
-                                {(it.type || "").replace("_", " ") || "Issue"}
-                              </span>
-                              {it.description ? (
-                                <> — <span className="text-gray-700">{it.description}</span></>
-                              ) : null}
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -571,7 +588,10 @@ export default function AdminPage() {
                     </div>
                   </div>
                   <div className="mt-3 flex gap-2">
-                    <a href={`/status/${encodeURIComponent(r.order_code)}`} className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">
+                    <a
+                      href={`/status?code=${encodeURIComponent(r.order_code)}`}
+                      className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
+                    >
                       Open status
                     </a>
                     <a href="/runner" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">
@@ -613,7 +633,7 @@ export default function AdminPage() {
                 </div>
                 <div className="mt-3 flex gap-2">
                   <a
-                    href={`/status/${encodeURIComponent(it.order_code)}`}
+                    href={`/status?code=${encodeURIComponent(it.order_code)}`}
                     className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50"
                   >
                     Open status
