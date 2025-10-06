@@ -1,14 +1,12 @@
-# Node/Next
-.next/
 node_modules/
+.next/
+.vercel/
+.turbo/
 dist/
+build/
+out/
+coverage/
 *.log
-
-# Env
-.env*
-!.env.example
-
-# OS / IDE
-.DS_Store
-Thumbs.db
-.vscode/
+*.tmp
+.env
+.env.*
