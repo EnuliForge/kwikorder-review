@@ -70,7 +70,8 @@ function downloadCsv(filename: string, csv: string) {
 
 export default function Page() {
   const sp = useSearchParams();
-  const days = Math.max(1, Math.min(30, Number(sp.get("days") ?? 1)));
+const rawDays = sp?.get("days");               // guard for nullable typing
+const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
 
   const [data, setData] = useState<VenueReportJSON | null>(null);
   const [err, setErr] = useState<string | null>(null);
