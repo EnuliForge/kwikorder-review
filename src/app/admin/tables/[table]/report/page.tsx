@@ -77,15 +77,16 @@ function downloadCSV(filename: string, text: string) {
 }
 
 export default function TableReportPage() {
-  const { table } = useParams<{ table: string }>();
-  const router = useRouter();
-  const sp = useSearchParams();
-  const days = Math.max(1, Math.min(30, Number(sp.get("days") ?? 1)));
+  // ⬇️ was: const { table } = useParams<{ table: string }>();
+  const params = useParams<{ table: string }>();
+  const table = (params?.table ?? "").trim();   // null-safe string
 
-  const [data, setData] = useState<ReportJSON | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [compact, setCompact] = useState(false);
+  const router = useRouter();
+
+  // ⬇️ was: const sp = useSearchParams(); const days = Math.max(... sp.get("days") ...)
+  const sp = useSearchParams();
+  const rawDays = sp?.get("days");              // null-safe
+  const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)))
 
   const title = useMemo(
     () => `Table ${table} — Report (last ${days} day${days > 1 ? "s" : ""})`,
