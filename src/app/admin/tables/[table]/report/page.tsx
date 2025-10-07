@@ -1,7 +1,7 @@
 // src/app/admin/tables/[table]/report/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 type Stream = "food" | "drinks" | null;
@@ -45,11 +45,7 @@ function money(n: number) {
 }
 function fmt(s?: string | null) {
   if (!s) return "—";
-  try {
-    return new Date(s).toLocaleString();
-  } catch {
-    return String(s);
-  }
+  try { return new Date(s).toLocaleString(); } catch { return String(s); }
 }
 
 /** CSV helpers (UTF-8 with BOM so Excel behaves) */
@@ -70,13 +66,11 @@ function downloadCSV(filename: string, text: string) {
   a.download = filename;
   document.body.appendChild(a);
   a.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-    a.remove();
-  }, 250);
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 250);
 }
 
-export default function TableReportPage() {
+/** Inner component that uses useSearchParams; wrapped in Suspense by the default export */
+function TableReportInner() {
   // route params (null-safe)
   const params = useParams<{ table: string }>();
   const table = (params?.table ?? "").trim();
@@ -88,7 +82,7 @@ export default function TableReportPage() {
   const rawDays = sp?.get("days");
   const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
 
-  // ✅ Add the missing state BEFORE effects that use them
+  // state
   const [data, setData] = useState<ReportJSON | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -118,14 +112,10 @@ export default function TableReportPage() {
         const r = await fetch(u, { cache: "no-store" });
         lastStatus = r.status;
         if (r.ok) return (await r.json()) as ReportJSON;
-        try {
-          lastText = await r.text();
-        } catch {}
+        try { lastText = await r.text(); } catch {}
       }
       throw new Error(
-        `Report endpoint not found (status ${lastStatus})${
-          lastText ? `: ${lastText.slice(0, 120)}…` : ""
-        }`
+        `Report endpoint not found (status ${lastStatus})${lastText ? `: ${lastText.slice(0, 120)}…` : ""}`
       );
     }
 
@@ -145,9 +135,7 @@ export default function TableReportPage() {
       }
     })();
 
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [table, days]);
 
   function replaceDays(d: number) {
@@ -159,17 +147,8 @@ export default function TableReportPage() {
 
     // Items CSV
     const itemHeaders = [
-      "table",
-      "order_code",
-      "order_created_at",
-      "order_closed_at",
-      "ticket_id",
-      "stream",
-      "ticket_status",
-      "item_name",
-      "qty",
-      "unit_price",
-      "line_total",
+      "table","order_code","order_created_at","order_closed_at","ticket_id",
+      "stream","ticket_status","item_name","qty","unit_price","line_total",
     ];
     const itemRows: any[][] = [];
 
@@ -177,15 +156,8 @@ export default function TableReportPage() {
       for (const t of o.tickets) {
         for (const L of t.lines) {
           itemRows.push([
-            data.table,
-            o.order_code,
-            fmt(o.created_at),
-            fmt(o.closed_at),
-            t.id,
-            t.stream ?? "",
-            t.status,
-            L.name,
-            L.qty,
+            data.table, o.order_code, fmt(o.created_at), fmt(o.closed_at),
+            t.id, t.stream ?? "", t.status, L.name, L.qty,
             Number(L.unit_price).toFixed(2),
             (Number(L.qty) * Number(L.unit_price)).toFixed(2),
           ]);
@@ -193,17 +165,8 @@ export default function TableReportPage() {
         // include a row if a ticket had no lines
         if (t.lines.length === 0) {
           itemRows.push([
-            data.table,
-            o.order_code,
-            fmt(o.created_at),
-            fmt(o.closed_at),
-            t.id,
-            t.stream ?? "",
-            t.status,
-            "(no items)",
-            0,
-            (0).toFixed(2),
-            (0).toFixed(2),
+            data.table, o.order_code, fmt(o.created_at), fmt(o.closed_at),
+            t.id, t.stream ?? "", t.status, "(no items)", 0, (0).toFixed(2), (0).toFixed(2),
           ]);
         }
       }
@@ -214,29 +177,16 @@ export default function TableReportPage() {
 
     // Issues CSV
     const issueHeaders = [
-      "table",
-      "order_code",
-      "ticket_id",
-      "stream",
-      "type",
-      "description",
-      "status",
-      "opened_at",
-      "resolved_at",
+      "table","order_code","ticket_id","stream","type",
+      "description","status","opened_at","resolved_at",
     ];
     const issueRows: any[][] = [];
     for (const o of data.orders) {
       for (const is of o.issues) {
         issueRows.push([
-          data.table,
-          o.order_code,
-          is.ticket_id ?? "",
-          is.stream ?? "",
-          (is.type || "").replace("_", " "),
-          is.description ?? "",
-          is.status,
-          fmt(is.created_at),
-          fmt(is.resolved_at ?? null),
+          data.table, o.order_code, is.ticket_id ?? "", is.stream ?? "",
+          (is.type || "").replace("_", " "), is.description ?? "", is.status,
+          fmt(is.created_at), fmt(is.resolved_at ?? null),
         ]);
       }
     }
@@ -386,9 +336,7 @@ export default function TableReportPage() {
                         <ul className="mt-2 text-sm">
                           {lines.map((L, i) => (
                             <li key={i} className="flex items-center justify-between py-0.5 hair">
-                              <span className="truncate">
-                                {L.name} × {L.qty}
-                              </span>
+                              <span className="truncate">{L.name} × {L.qty}</span>
                               <span className="font-medium">{money(Number(L.qty) * Number(L.unit_price))}</span>
                             </li>
                           ))}
@@ -430,5 +378,14 @@ export default function TableReportPage() {
         </>
       )}
     </main>
+  );
+}
+
+/** Default export: Suspense wrapper around the inner component */
+export default function TableReportPage() {
+  return (
+    <Suspense fallback={<div className="rounded-xl border p-4 bg-white">Loading…</div>}>
+      <TableReportInner />
+    </Suspense>
   );
 }
