@@ -86,23 +86,33 @@ function MenuInner() {
 
   // ---------- Idle auto-return (15 min) if cart empty ----------
   const { items: cartItems } = useCart();
-  const lastActiveRef = useRef<number>(Date.now());
-  useEffect(() => {
-    const bump = () => { lastActiveRef.current = Date.now(); };
-    const evs: (keyof WindowEventMap)[] = ["click", "keydown", "touchstart", "scroll", "visibilitychange"];
-    evs.forEach((e) => window.addEventListener(e, bump));
-    const t = setInterval(() => {
-      const idleMs = Date.now() - lastActiveRef.current;
-      const canLeave = cartItems.length === 0;
-      if (canLeave && idleMs >= 15 * 60 * 1000) {
-        endSession();
-      }
-    }, 60 * 1000);
-    return () => {
-      evs.forEach((e) => window.removeEventListener(e, bump));
-      clearInterval(t);
-    };
-  }, [cartItems.length]);
+const lastActiveRef = useRef<number>(Date.now());
+
+useEffect(() => {
+  const bump = () => { lastActiveRef.current = Date.now(); };
+
+  // window-scoped events
+  const windowEvents: Array<keyof WindowEventMap> = ["click", "keydown", "touchstart", "scroll"];
+  windowEvents.forEach((e) => window.addEventListener(e, bump));
+
+  // document-scoped visibility event
+  const onVisibility = () => { lastActiveRef.current = Date.now(); };
+  document.addEventListener("visibilitychange", onVisibility);
+
+  const t = setInterval(() => {
+    const idleMs = Date.now() - lastActiveRef.current;
+    const canLeave = cartItems.length === 0;
+    if (canLeave && idleMs >= 15 * 60 * 1000) {
+      endSession();
+    }
+  }, 60 * 1000);
+
+  return () => {
+    windowEvents.forEach((e) => window.removeEventListener(e, bump));
+    document.removeEventListener("visibilitychange", onVisibility);
+    clearInterval(t);
+  };
+}, [cartItems.length]);
 
   // ---------- Quick-change table ----------
   const changeTable = () => {
