@@ -18,14 +18,14 @@ function MenuInner() {
   const [items, setItems] = useState<MenuItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
-  const searchParams = useSearchParams();
+  const sp = useSearchParams();
   const router = useRouter();
 
   // table number
   const [table, setTable] = useState<number | null>(null);
   useEffect(() => {
     let resolved: number | null = null;
-    const fromUrl = searchParams.get("table") || searchParams.get("t");
+    const fromUrl = sp?.get("table") || sp?.get("t");
     if (fromUrl) {
       const n = parseInt(fromUrl, 10);
       if (Number.isFinite(n) && n > 0) {
