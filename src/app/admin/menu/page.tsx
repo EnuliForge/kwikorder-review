@@ -43,7 +43,7 @@ function MenuInner() {
       } catch {}
     }
     setTable(resolved);
-  }, [searchParams]);
+  }, [sp]);
 
   // load+refresh
   useEffect(() => {
