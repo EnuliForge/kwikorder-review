@@ -5,11 +5,11 @@ export const dynamic = "force-dynamic";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 
-import CartProvider, { useCart } from "../../components/CartProvider";
-import MenuItemCard from "../../components/MenuItemCard";
-import BottomCartDrawer from "../../components/BottomCartDrawer";
-import SearchBar from "../../components/SearchBar";
-import type { MenuItem as BaseMenuItem } from "../../lib/types";
+import CartProvider, { useCart } from "@/components/CartProvider";
+import MenuItemCard from "@/components/MenuItemCard";
+import BottomCartDrawer from "@/components/BottomCartDrawer";
+import SearchBar from "@/components/SearchBar";
+import type { MenuItem as BaseMenuItem } from "@/lib/types";
 
 
 // ⬇️ correct path and alias the base type
