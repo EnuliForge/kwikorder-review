@@ -1,180 +1,252 @@
+// src/app/menu/page.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import CartProvider, { useCart } from "../../components/CartProvider";
+import MenuItemCard from "../../components/MenuItemCard";
+import BottomCartDrawer from "../../components/BottomCartDrawer";
+import SearchBar from "../../components/SearchBar";
+import type { MenuItem } from "../../lib/types";
 
-type Item = {
-  id: number;
-  name: string;
-  price: number;
-  stream: "food" | "drinks" | null;
-  hidden: boolean;
-  is_available: boolean;
-  updated_at: string | null;
-};
+type Section = { key: string; title: string; items: MenuItem[] };
 
-export default function AdminMenuPage() {
+function MenuInner() {
+  const [items, setItems] = useState<MenuItem[]>([]);
+  const [loading, setLoading] = useState(true); // first-load skeleton
   const [q, setQ] = useState("");
-  const [stream, setStream] = useState<"" | "all" | "food" | "drinks">("all");
-  const [includeHidden, setIncludeHidden] = useState(true);
-  const [includeUnavailable, setIncludeUnavailable] = useState(true);
-  const [items, setItems] = useState<Item[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
-  const [busyIds, setBusyIds] = useState<number[]>([]);
+  const searchParams = useSearchParams();
+  const router = useRouter();
 
-  async function load() {
-    try {
-      setErr(null);
-      setLoading(true);
-      const params = new URLSearchParams();
-      if (q.trim()) params.set("q", q.trim());
-      if (stream) params.set("stream", stream);
-      params.set("include_hidden", String(includeHidden));
-      params.set("include_unavailable", String(includeUnavailable));
-
-      const r = await fetch(`/api/admin/menu/list?${params.toString()}`, { cache: "no-store" });
-      const j = await r.json();
-      if (!r.ok || !j.ok) throw new Error(j?.error || "Failed to load menu");
-      setItems(Array.isArray(j.items) ? j.items : []);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load menu");
-    } finally {
-      setLoading(false);
-    }
-  }
-
+  // ---------- Table number ----------
+  const [table, setTable] = useState<number | null>(null);
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let resolved: number | null = null;
+    const fromUrl = searchParams?.get("table") || searchParams?.get("t");
+    if (fromUrl) {
+      const n = parseInt(fromUrl, 10);
+      if (Number.isFinite(n) && n > 0) {
+        resolved = n;
+        try { localStorage.setItem("kwik.table", String(n)); } catch {}
+      }
+    }
+    if (resolved === null) {
+      try {
+        const t = localStorage.getItem("kwik.table");
+        if (t) {
+          const n = parseInt(t, 10);
+          if (Number.isFinite(n) && n > 0) resolved = n;
+        }
+      } catch {}
+    }
+    setTable(resolved);
+  }, [searchParams]);
+
+  // ---------- Load + auto-refresh menu ----------
+  useEffect(() => {
+    let alive = true;
+    let first = true;
+
+    const load = async () => {
+      try {
+        if (first) setLoading(true);
+        const r = await fetch("/api/menu?stream=all", { cache: "no-store" });
+        const j = await r.json();
+        if (!alive) return;
+        setItems(j.items ?? []);
+      } catch {
+        /* ignore */
+      } finally {
+        if (!alive) return;
+        if (first) {
+          setLoading(false);
+          first = false;
+        }
+      }
+    };
+
+    load(); // initial
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    const t = setInterval(load, 15000); // refresh periodically
+
+    return () => {
+      alive = false;
+      window.removeEventListener("focus", onFocus);
+      clearInterval(t);
+    };
   }, []);
 
-  const filtered = useMemo(() => items, [items]); // server is already filtering
-
-  async function updateItem(id: number, patch: Partial<Pick<Item, "hidden" | "is_available">>) {
-    try {
-      setBusyIds((s) => [...s, id]);
-      const r = await fetch("/api/admin/menu/update", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id, ...patch }),
-      });
-      const j = await r.json();
-      if (!r.ok || !j.ok) throw new Error(j?.error || "Update failed");
-      await load();
-    } catch (e: any) {
-      alert(e?.message || "Update failed");
-    } finally {
-      setBusyIds((s) => s.filter((x) => x !== id));
-    }
+  // ---------- End session ----------
+  function endSession() {
+    try { localStorage.removeItem("kwik.table"); } catch {}
+    router.replace("/start");
   }
 
+  // ---------- Idle auto-return (15 min) if cart empty ----------
+  const { items: cartItems } = useCart();
+  const lastActiveRef = useRef<number>(Date.now());
+  useEffect(() => {
+    const bump = () => { lastActiveRef.current = Date.now(); };
+    const evs: (keyof WindowEventMap)[] = ["click", "keydown", "touchstart", "scroll", "visibilitychange"];
+    evs.forEach((e) => window.addEventListener(e, bump));
+    const t = setInterval(() => {
+      const idleMs = Date.now() - lastActiveRef.current;
+      const canLeave = cartItems.length === 0;
+      if (canLeave && idleMs >= 15 * 60 * 1000) {
+        endSession();
+      }
+    }, 60 * 1000);
+    return () => {
+      evs.forEach((e) => window.removeEventListener(e, bump));
+      clearInterval(t);
+    };
+  }, [cartItems.length]);
+
+  // ---------- Quick-change table ----------
+  const changeTable = () => {
+    const input = prompt("Enter table number");
+    if (!input) return;
+    const n = parseInt(input, 10);
+    if (!Number.isFinite(n) || n <= 0) return alert("Invalid table number");
+    setTable(n);
+    try { localStorage.setItem("kwik.table", String(n)); } catch {}
+    router.replace(`/menu?table=${n}`);
+  };
+
+  // ---------- Search filter ----------
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return items;
+    return items.filter((it) =>
+      [it.name, (it as any).description, (it as any).category] // safe-cast for missing fields in MenuItem type
+        .filter(Boolean)
+        .some((v) => String(v).toLowerCase().includes(s))
+    );
+  }, [items, q]);
+
+  // ---------- Grouping: stream → category ----------
+  const sections: Section[] = useMemo(() => {
+    const bucket = new Map<string, Section>();
+
+    const titleFor = (stream: string | null | undefined, category: string | null | undefined) => {
+      const sTitle = stream === "drinks" ? "Drinks" : "Food";
+      return category ? `${sTitle} — ${category}` : sTitle;
+    };
+
+    for (const it of filtered) {
+      const key = `${it.stream || "food"}::${(it as any).category || ""}`;
+      if (!bucket.has(key)) {
+        bucket.set(key, {
+          key,
+          title: titleFor(it.stream as any, (it as any).category as any),
+          items: [],
+        });
+      }
+      bucket.get(key)!.items.push(it);
+    }
+
+    // order: Food sections first, then Drinks; each by sort_order then name
+    const arr = Array.from(bucket.values());
+    arr.sort((a, b) => {
+      const sA = a.title.startsWith("Food") ? 0 : 1;
+      const sB = b.title.startsWith("Food") ? 0 : 1;
+      if (sA !== sB) return sA - sB;
+      return a.title.localeCompare(b.title);
+    });
+    for (const sec of arr) {
+      sec.items.sort((a, b) => {
+        const so = ((a as any).sort_order ?? 0) - ((b as any).sort_order ?? 0);
+        return so !== 0 ? so : a.name.localeCompare(b.name);
+      });
+    }
+    return arr;
+  }, [filtered]);
+
   return (
-    <main className="mx-auto max-w-4xl p-6">
-      <header className="mb-4 flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Admin • Menu</h1>
-        <div className="flex gap-2">
-          <a href="/admin" className="text-sm rounded-lg border px-3 py-2 hover:bg-gray-50">Back to Admin</a>
+    <main className="mx-auto max-w-6xl px-4 pb-40">
+      {/* Header */}
+      <header className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h1 className="text-2xl font-bold">Menu</h1>
+          <div className="rounded-full border px-3 py-1 text-sm">
+            {table != null ? <>Table <span className="font-semibold">{table}</span></> : <span className="text-gray-500">No table set</span>}
+          </div>
+          <button
+            type="button"
+            className="text-xs rounded-md border px-2 py-1 hover:bg-gray-50"
+            onClick={changeTable}
+          >
+            Change
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => location.reload()}
+            className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+            title="Hard refresh menu"
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            onClick={endSession}
+            className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
+            title="Clear table and return to start"
+          >
+            End session
+          </button>
         </div>
       </header>
 
-      {err && <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">{err}</div>}
-
-      <div className="mb-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <input
-          className="rounded-lg border px-3 py-2 text-sm"
-          placeholder="Search name…"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && load()}
-        />
-        <select
-          className="rounded-lg border px-3 py-2 text-sm"
-          value={stream}
-          onChange={(e) => setStream(e.target.value as any)}
-        >
-          <option value="all">All streams</option>
-          <option value="food">Food</option>
-          <option value="drinks">Drinks</option>
-        </select>
-        <div className="flex items-center gap-3 rounded-lg border px-3 py-2 text-sm">
-          <label className="inline-flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={includeHidden}
-              onChange={(e) => setIncludeHidden(e.target.checked)}
-            />
-            Include hidden
-          </label>
-          <label className="inline-flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={includeUnavailable}
-              onChange={(e) => setIncludeUnavailable(e.target.checked)}
-            />
-            Include 86’d
-          </label>
-          <button
-            onClick={load}
-            className="ml-auto rounded-lg border px-3 py-1 hover:bg-gray-50"
-          >
-            Apply
-          </button>
+      {table != null ? (
+        <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-emerald-800">
+          Ordering for <strong>Table {table}</strong>.
         </div>
-      </div>
-
-      {loading ? (
-        <div className="grid gap-2">
-          <div className="h-16 rounded-lg bg-gray-100 animate-pulse" />
-          <div className="h-16 rounded-lg bg-gray-100 animate-pulse" />
-          <div className="h-16 rounded-lg bg-gray-100 animate-pulse" />
-        </div>
-      ) : filtered.length === 0 ? (
-        <div className="rounded-xl border p-4 text-sm text-gray-600">No matching items.</div>
       ) : (
-        <ul className="grid gap-2">
-          {filtered.map((it) => {
-            const isBusy = busyIds.includes(it.id);
-            const color =
-              it.hidden
-                ? "bg-gray-50 border-gray-300 text-gray-700"
-                : !it.is_available
-                ? "bg-red-50 border-red-300 text-red-900"
-                : "bg-white";
-            return (
-              <li key={it.id} className={`rounded-xl border p-3 ${color}`}>
-                <div className="flex items-center justify-between">
-                  <div className="font-medium">
-                    <span className="capitalize">{it.stream ?? "—"}</span>
-                    {" • "}
-                    {it.name}
-                    <span className="ml-2 text-gray-600 font-normal">K {it.price.toFixed(2)}</span>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      disabled={isBusy}
-                      onClick={() => updateItem(it.id, { is_available: !it.is_available })}
-                      className="rounded-lg border px-3 py-1 text-sm disabled:opacity-60"
-                      title={it.is_available ? "86 (mark unavailable)" : "Un-86 (mark available)"}
-                    >
-                      {isBusy ? "Working…" : (it.is_available ? "86" : "Un-86")}
-                    </button>
-                    <button
-                      disabled={isBusy}
-                      onClick={() => updateItem(it.id, { hidden: !it.hidden })}
-                      className="rounded-lg border px-3 py-1 text-sm disabled:opacity-60"
-                      title={it.hidden ? "Unhide" : "Hide"}
-                    >
-                      {isBusy ? "Working…" : (it.hidden ? "Unhide" : "Hide")}
-                    </button>
-                  </div>
-                </div>
-                {it.hidden && <div className="text-xs mt-1 text-gray-600">Hidden</div>}
-                {!it.is_available && <div className="text-xs mt-1 text-red-700">86’d / Unavailable</div>}
-              </li>
-            );
-          })}
+        <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+          Set your table number on the start page before placing an order.
+        </div>
+      )}
+
+      <SearchBar value={q} onChange={setQ} />
+
+      {/* First-load skeleton */}
+      {loading ? (
+        <ul className="grid list-none p-0 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <li key={i} className="h-40 rounded-2xl bg-gray-100 animate-pulse" />
+          ))}
         </ul>
+      ) : sections.length === 0 ? (
+        <div className="mt-6 text-sm text-gray-600">No matching items.</div>
+      ) : (
+        <div className="mt-2 space-y-8">
+          {sections.map((sec) => (
+            <section key={sec.key}>
+              <h2 className="mb-2 text-lg font-semibold">{sec.title}</h2>
+              <ul className="grid list-none p-0 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {sec.items.map((it) => (
+                  <MenuItemCard key={String((it as any).id ?? it.name)} item={it} />
+                ))}
+              </ul>
+            </section>
+          ))}
+        </div>
       )}
     </main>
+  );
+}
+
+/** Default export — wrap in Suspense so useSearchParams is allowed */
+export default function MenuPage() {
+  return (
+    <Suspense fallback={<div className="mx-auto max-w-6xl px-4 py-10">Loading…</div>}>
+      <CartProvider>
+        <MenuInner />
+        <BottomCartDrawer />
+      </CartProvider>
+    </Suspense>
   );
 }
