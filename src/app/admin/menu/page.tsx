@@ -9,10 +9,21 @@ import CartProvider, { useCart } from "../../../components/CartProvider";
 import MenuItemCard from "../../../components/MenuItemCard";
 import BottomCartDrawer from "../../../components/BottomCartDrawer";
 import SearchBar from "../../../components/SearchBar";
-import type { MenuItem } from "../../../lib/types";
 
+// ⬇️ correct path and alias the base type
+import type { MenuItem as BaseMenuItem } from "../../../lib/types";
 
+// ⬇️ extend locally for fields this page uses
+type MenuItem = BaseMenuItem & {
+  category?: string | null;
+  description?: string | null;
+  stream?: "food" | "drinks" | null;
+  sort_order?: number | null;
+};
+
+// For grouping
 type Section = { key: string; title: string; items: MenuItem[] };
+
 
 function MenuInner() {
   const [items, setItems] = useState<MenuItem[]>([]);
