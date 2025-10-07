@@ -1,28 +1,29 @@
 // src/app/menu/page.tsx
 "use client";
+export const dynamic = "force-dynamic";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import CartProvider, { useCart } from "@/components/CartProvider";
-import MenuItemCard from "@/components/MenuItemCard";
-import BottomCartDrawer from "@/components/BottomCartDrawer";
-import SearchBar from "@/components/SearchBar";
-import type { MenuItem } from "@/lib/types";
+import CartProvider, { useCart } from "../../components/CartProvider";
+import MenuItemCard from "../../components/MenuItemCard";
+import BottomCartDrawer from "../../components/BottomCartDrawer";
+import SearchBar from "../../components/SearchBar";
+import type { MenuItem } from "../../lib/types";
 
 type Section = { key: string; title: string; items: MenuItem[] };
 
 function MenuInner() {
   const [items, setItems] = useState<MenuItem[]>([]);
-  const [loading, setLoading] = useState(true); // first-load skeleton
+  const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const searchParams = useSearchParams();
   const router = useRouter();
 
-  // ---------- Table number ----------
+  // table number
   const [table, setTable] = useState<number | null>(null);
   useEffect(() => {
     let resolved: number | null = null;
-    const fromUrl = searchParams?.get("table") || searchParams?.get("t");
+    const fromUrl = searchParams.get("table") || searchParams.get("t");
     if (fromUrl) {
       const n = parseInt(fromUrl, 10);
       if (Number.isFinite(n) && n > 0) {
@@ -42,11 +43,10 @@ function MenuInner() {
     setTable(resolved);
   }, [searchParams]);
 
-  // ---------- Load + auto-refresh menu ----------
+  // load+refresh
   useEffect(() => {
     let alive = true;
     let first = true;
-
     const load = async () => {
       try {
         if (first) setLoading(true);
@@ -54,9 +54,7 @@ function MenuInner() {
         const j = await r.json();
         if (!alive) return;
         setItems(j.items ?? []);
-      } catch {
-        /* ignore */
-      } finally {
+      } catch {} finally {
         if (!alive) return;
         if (first) {
           setLoading(false);
@@ -64,12 +62,10 @@ function MenuInner() {
         }
       }
     };
-
-    load(); // initial
+    load();
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
-    const t = setInterval(load, 15000); // refresh periodically
-
+    const t = setInterval(load, 15000);
     return () => {
       alive = false;
       window.removeEventListener("focus", onFocus);
@@ -77,43 +73,28 @@ function MenuInner() {
     };
   }, []);
 
-  // ---------- End session ----------
-  function endSession() {
-    try { localStorage.removeItem("kwik.table"); } catch {}
-    router.replace("/start");
-  }
-
-  // ---------- Idle auto-return (15 min) if cart empty ----------
+  // idle auto-return (15m) if cart empty
   const { items: cartItems } = useCart();
-const lastActiveRef = useRef<number>(Date.now());
+  const lastActiveRef = useRef<number>(Date.now());
+  useEffect(() => {
+    const bump = () => { lastActiveRef.current = Date.now(); };
+    const evs: (keyof WindowEventMap)[] = ["click", "keydown", "touchstart", "scroll"];
+    evs.forEach((e) => window.addEventListener(e, bump));
+    const t = setInterval(() => {
+      const idleMs = Date.now() - lastActiveRef.current;
+      const canLeave = cartItems.length === 0;
+      if (canLeave && idleMs >= 15 * 60 * 1000) {
+        try { localStorage.removeItem("kwik.table"); } catch {}
+        router.replace("/start");
+      }
+    }, 60 * 1000);
+    return () => {
+      evs.forEach((e) => window.removeEventListener(e, bump));
+      clearInterval(t);
+    };
+  }, [cartItems.length, router]);
 
-useEffect(() => {
-  const bump = () => { lastActiveRef.current = Date.now(); };
-
-  // window-scoped events
-  const windowEvents: Array<keyof WindowEventMap> = ["click", "keydown", "touchstart", "scroll"];
-  windowEvents.forEach((e) => window.addEventListener(e, bump));
-
-  // document-scoped visibility event
-  const onVisibility = () => { lastActiveRef.current = Date.now(); };
-  document.addEventListener("visibilitychange", onVisibility);
-
-  const t = setInterval(() => {
-    const idleMs = Date.now() - lastActiveRef.current;
-    const canLeave = cartItems.length === 0;
-    if (canLeave && idleMs >= 15 * 60 * 1000) {
-      endSession();
-    }
-  }, 60 * 1000);
-
-  return () => {
-    windowEvents.forEach((e) => window.removeEventListener(e, bump));
-    document.removeEventListener("visibilitychange", onVisibility);
-    clearInterval(t);
-  };
-}, [cartItems.length]);
-
-  // ---------- Quick-change table ----------
+  // change table
   const changeTable = () => {
     const input = prompt("Enter table number");
     if (!input) return;
@@ -124,39 +105,30 @@ useEffect(() => {
     router.replace(`/menu?table=${n}`);
   };
 
-  // ---------- Search filter ----------
+  // filter + group
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return items;
     return items.filter((it) =>
-      [it.name, (it as any).description, (it as any).category] // safe-cast for missing fields in MenuItem type
+      [it.name, it.description, it.category]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(s))
     );
   }, [items, q]);
 
-  // ---------- Grouping: stream → category ----------
   const sections: Section[] = useMemo(() => {
     const bucket = new Map<string, Section>();
-
     const titleFor = (stream: string | null | undefined, category: string | null | undefined) => {
       const sTitle = stream === "drinks" ? "Drinks" : "Food";
       return category ? `${sTitle} — ${category}` : sTitle;
     };
-
     for (const it of filtered) {
-      const key = `${it.stream || "food"}::${(it as any).category || ""}`;
+      const key = `${it.stream || "food"}::${it.category || ""}`;
       if (!bucket.has(key)) {
-        bucket.set(key, {
-          key,
-          title: titleFor(it.stream as any, (it as any).category as any),
-          items: [],
-        });
+        bucket.set(key, { key, title: titleFor(it.stream as any, it.category as any), items: [] });
       }
       bucket.get(key)!.items.push(it);
     }
-
-    // order: Food sections first, then Drinks; each by sort_order then name
     const arr = Array.from(bucket.values());
     arr.sort((a, b) => {
       const sA = a.title.startsWith("Food") ? 0 : 1;
@@ -166,7 +138,7 @@ useEffect(() => {
     });
     for (const sec of arr) {
       sec.items.sort((a, b) => {
-        const so = ((a as any).sort_order ?? 0) - ((b as any).sort_order ?? 0);
+        const so = (a.sort_order ?? 0) - (b.sort_order ?? 0);
         return so !== 0 ? so : a.name.localeCompare(b.name);
       });
     }
@@ -175,36 +147,21 @@ useEffect(() => {
 
   return (
     <main className="mx-auto max-w-6xl px-4 pb-40">
-      {/* Header */}
       <header className="mb-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <h1 className="text-2xl font-bold">Menu</h1>
           <div className="rounded-full border px-3 py-1 text-sm">
             {table != null ? <>Table <span className="font-semibold">{table}</span></> : <span className="text-gray-500">No table set</span>}
           </div>
-          <button
-            type="button"
-            className="text-xs rounded-md border px-2 py-1 hover:bg-gray-50"
-            onClick={changeTable}
-          >
+          <button type="button" className="text-xs rounded-md border px-2 py-1 hover:bg-gray-50" onClick={changeTable}>
             Change
           </button>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => location.reload()}
-            className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-            title="Hard refresh menu"
-          >
+          <button type="button" onClick={() => location.reload()} className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" title="Hard refresh menu">
             Refresh
           </button>
-          <button
-            type="button"
-            onClick={endSession}
-            className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50"
-            title="Clear table and return to start"
-          >
+          <button type="button" onClick={() => { try { localStorage.removeItem("kwik.table"); } catch {}; router.replace("/start"); }} className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" title="Clear table and return to start">
             End session
           </button>
         </div>
@@ -222,7 +179,6 @@ useEffect(() => {
 
       <SearchBar value={q} onChange={setQ} />
 
-      {/* First-load skeleton */}
       {loading ? (
         <ul className="grid list-none p-0 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 6 }).map((_, i) => (
@@ -238,7 +194,7 @@ useEffect(() => {
               <h2 className="mb-2 text-lg font-semibold">{sec.title}</h2>
               <ul className="grid list-none p-0 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {sec.items.map((it) => (
-                  <MenuItemCard key={String((it as any).id ?? it.name)} item={it} />
+                  <MenuItemCard key={String(it.id)} item={it} />
                 ))}
               </ul>
             </section>
@@ -249,14 +205,14 @@ useEffect(() => {
   );
 }
 
-/** Default export — wrap in Suspense so useSearchParams is allowed */
 export default function MenuPage() {
   return (
     <CartProvider>
       <Suspense fallback={<main className="mx-auto max-w-6xl px-4 pb-40">Loading…</main>}>
+        {/* Everything that might call useSearchParams goes inside Suspense */}
         <MenuInner />
+        <BottomCartDrawer />
       </Suspense>
-      <BottomCartDrawer />
     </CartProvider>
   );
 }
