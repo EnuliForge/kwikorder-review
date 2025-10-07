@@ -2,14 +2,13 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js";
 import { getTableSummaryColorAndLabel, type TableOrderLite } from "@/lib/adminColors";
-import { getInt } from "@/lib/http/params"; // ← use this to normalize query params
 
 /* ----------------------------- Types ----------------------------- */
 type OgRow = {
   id: number;
   order_code: string | null;
   table_number: number | null;
-  created_at: string;                 // ISO string
+  created_at: string;
   resolution_required: boolean | null;
   closed_at: string | null;
 };
@@ -25,7 +24,7 @@ type Summary = {
 
 type Ok = {
   ok: true;
-  orders: OgRow[];                    // kept for back-compat (active only)
+  orders: OgRow[];
   active_orders: OgRow[];
   recent_closed_orders: OgRow[];
   summary: Summary;
@@ -33,36 +32,38 @@ type Ok = {
 type Err = { ok: false; error: string };
 type Resp = Ok | Err;
 
+/* ------------------------------ Helper ------------------------------ */
+function first(q: string | string[] | undefined): string | undefined {
+  return Array.isArray(q) ? q[0] : q;
+}
+
 /* ---------------------------- Handler ---------------------------- */
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse<Resp>
-) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse<Resp>) {
   try {
-    // 1) Method guard
     if (req.method !== "GET") {
       res.setHeader("Allow", "GET");
       return res.status(405).json({ ok: false, error: "Method Not Allowed" });
     }
 
-    // 2) Parse & validate inputs (using helpers)
-    const table = getInt(req.query.table, { min: 1 });
-    if (table == null) {
+    // Parse & validate inputs (no external helpers)
+    const tableRaw = first(req.query.table);
+    const table = Number(tableRaw);
+    if (!Number.isFinite(table)) {
       return res.status(400).json({ ok: false, error: "table must be a number" });
     }
 
-    // cap lookback to something reasonable (e.g., 0..1440 minutes = 24h)
-    const lookbackMins = getInt(req.query.lookback_mins, { min: 0, max: 1440 }) ?? 120;
-    const sinceIso = new Date(Date.now() - lookbackMins * 60_000).toISOString();
+    const lookbackRaw = first(req.query.lookback_mins);
+    const lookbackMins = Number.isFinite(Number(lookbackRaw)) ? Number(lookbackRaw) : 120;
+    const sinceIso = new Date(Date.now() - Math.max(0, lookbackMins) * 60_000).toISOString();
 
-    // 3) Supabase (server-side credentials)
+    // Supabase (server-side keys)
     const supa = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!, // server-only
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { persistSession: false } }
     );
 
-    // 4) Queries
+    // Queries
     const activeQ = supa
       .from("order_groups")
       .select("id, order_code, table_number, created_at, resolution_required, closed_at")
@@ -82,9 +83,9 @@ export default async function handler(
       await Promise.all([activeQ, recentClosedQ]);
 
     if (activeErr) return res.status(500).json({ ok: false, error: activeErr.message });
-    if (rcErr)     return res.status(500).json({ ok: false, error: rcErr.message });
+    if (rcErr) return res.status(500).json({ ok: false, error: rcErr.message });
 
-    // 5) Normalize → strongly typed
+    // Normalize rows
     const norm = (rows: unknown[]): OgRow[] =>
       (rows ?? []).map((r) => {
         const o = r as Partial<OgRow> & Record<string, unknown>;
@@ -101,7 +102,7 @@ export default async function handler(
     const active = norm(activeData ?? []);
     const recentClosed = norm(rcData ?? []);
 
-    // 6) Summary color/label for the admin grid
+    // Summary color/label
     const toLite = (r: OgRow): TableOrderLite => ({
       order_code: r.order_code ?? "",
       closed_at: r.closed_at,
@@ -113,12 +114,10 @@ export default async function handler(
       recentClosed.map(toLite)
     );
 
-    // (optional) Cache hint
     res.setHeader("Cache-Control", "no-store");
-
     return res.status(200).json({
       ok: true,
-      orders: active,                 // back-compat
+      orders: active,
       active_orders: active,
       recent_closed_orders: recentClosed,
       summary: {
