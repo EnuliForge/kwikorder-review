@@ -22,7 +22,7 @@ function MenuInner() {
   const [table, setTable] = useState<number | null>(null);
   useEffect(() => {
     let resolved: number | null = null;
-    const fromUrl = searchParams.get("table") || searchParams.get("t");
+    const fromUrl = searchParams?.get("table") || searchParams?.get("t"); // null-safe
     if (fromUrl) {
       const n = parseInt(fromUrl, 10);
       if (Number.isFinite(n) && n > 0) {
@@ -68,7 +68,7 @@ function MenuInner() {
     load(); // initial
     const onFocus = () => load();
     window.addEventListener("focus", onFocus);
-    const t = setInterval(load, 15000); // every 15s, so 86s reflect quickly
+    const t = setInterval(load, 15000); // every 15s
 
     return () => {
       alive = false;
@@ -88,8 +88,14 @@ function MenuInner() {
   const lastActiveRef = useRef<number>(Date.now());
   useEffect(() => {
     const bump = () => { lastActiveRef.current = Date.now(); };
-    const evs: (keyof WindowEventMap)[] = ["click", "keydown", "touchstart", "scroll", "visibilitychange"];
-    evs.forEach((e) => window.addEventListener(e, bump, { passive: true } as any));
+
+    // window-level interactions
+    const windowEvs: (keyof WindowEventMap)[] = ["click", "keydown", "touchstart", "scroll"];
+    for (const ev of windowEvs) window.addEventListener(ev, bump);
+
+    // document-level visibility
+    document.addEventListener("visibilitychange", bump);
+
     const t = setInterval(() => {
       const idleMs = Date.now() - lastActiveRef.current;
       const canLeave = cartItems.length === 0;
@@ -97,8 +103,10 @@ function MenuInner() {
         endSession();
       }
     }, 60 * 1000);
+
     return () => {
-      evs.forEach((e) => window.removeEventListener(e, bump as any));
+      for (const ev of windowEvs) window.removeEventListener(ev, bump);
+      document.removeEventListener("visibilitychange", bump);
       clearInterval(t);
     };
   }, [cartItems.length]);
@@ -119,7 +127,7 @@ function MenuInner() {
     const s = q.trim().toLowerCase();
     if (!s) return items;
     return items.filter((it) =>
-      [it.name, it.description, it.category]
+      [it.name, it.description, (it as any).category]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(s))
     );
@@ -135,11 +143,11 @@ function MenuInner() {
     };
 
     for (const it of filtered) {
-      const key = `${it.stream || "food"}::${it.category || ""}`;
+      const key = `${it.stream || "food"}::${(it as any).category || ""}`;
       if (!bucket.has(key)) {
         bucket.set(key, {
           key,
-          title: titleFor(it.stream as any, it.category as any),
+          title: titleFor(it.stream as any, (it as any).category as any),
           items: [],
         });
       }
@@ -156,7 +164,7 @@ function MenuInner() {
     });
     for (const sec of arr) {
       sec.items.sort((a, b) => {
-        const so = (a.sort_order ?? 0) - (b.sort_order ?? 0);
+        const so = ((a as any).sort_order ?? 0) - ((b as any).sort_order ?? 0);
         return so !== 0 ? so : a.name.localeCompare(b.name);
       });
     }

@@ -2,8 +2,7 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js";
 import { getTableSummaryColorAndLabel, type TableOrderLite } from "@/lib/adminColors";
-// If "@/..." fails inside pages/api, swap to a relative import:
-// import { getTableSummaryColorAndLabel, type TableOrderLite } from "../../../lib/adminColors";
+import { getInt } from "@/lib/http/params"; // ← use this to normalize query params
 
 /* ----------------------------- Types ----------------------------- */
 type OgRow = {
@@ -46,26 +45,20 @@ export default async function handler(
       return res.status(405).json({ ok: false, error: "Method Not Allowed" });
     }
 
-    // 2) Parse & validate inputs
-    const tableRaw = Array.isArray(req.query.table) ? req.query.table[0] : req.query.table;
-    const table = Number(tableRaw);
-    if (!Number.isFinite(table)) {
+    // 2) Parse & validate inputs (using helpers)
+    const table = getInt(req.query.table, { min: 1 });
+    if (table == null) {
       return res.status(400).json({ ok: false, error: "table must be a number" });
     }
 
-    const lookbackRaw = Array.isArray(req.query.lookback_mins)
-      ? req.query.lookback_mins[0]
-      : req.query.lookback_mins;
-
-    const lookbackMins = Number.isFinite(Number(lookbackRaw)) ? Number(lookbackRaw) : 120;
-    const sinceIso = new Date(
-      Date.now() - Math.max(0, lookbackMins) * 60_000
-    ).toISOString();
+    // cap lookback to something reasonable (e.g., 0..1440 minutes = 24h)
+    const lookbackMins = getInt(req.query.lookback_mins, { min: 0, max: 1440 }) ?? 120;
+    const sinceIso = new Date(Date.now() - lookbackMins * 60_000).toISOString();
 
     // 3) Supabase (server-side credentials)
     const supa = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!, // server-only
       { auth: { persistSession: false } }
     );
 
@@ -91,7 +84,7 @@ export default async function handler(
     if (activeErr) return res.status(500).json({ ok: false, error: activeErr.message });
     if (rcErr)     return res.status(500).json({ ok: false, error: rcErr.message });
 
-    // 5) Normalize → strongly typed (no any)
+    // 5) Normalize → strongly typed
     const norm = (rows: unknown[]): OgRow[] =>
       (rows ?? []).map((r) => {
         const o = r as Partial<OgRow> & Record<string, unknown>;
@@ -120,7 +113,7 @@ export default async function handler(
       recentClosed.map(toLite)
     );
 
-    // (optional) Cache hint for server components calling this
+    // (optional) Cache hint
     res.setHeader("Cache-Control", "no-store");
 
     return res.status(200).json({

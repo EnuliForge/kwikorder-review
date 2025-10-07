@@ -1,33 +1,114 @@
 // src/pages/api/menu/list.ts
 import type { NextApiRequest, NextApiResponse } from "next";
-import { supabaseServer } from "@/lib/supabaseServer";
+import { createClient } from "@supabase/supabase-js"; // anon key for read-only menu
+import { getStr, getBool } from "@/lib/http/params";
 
-import type { NextApiRequest, NextApiResponse } from "next";
-import { createClient } from "@supabase/supabase-js";
+/* ----------------------------- Types ----------------------------- */
+type Stream = "food" | "drinks" | "all";
 
+type ItemRow = {
+  id: number;
+  sku: string;
+  name: string;
+  price: number | null;
+  stream: "food" | "drinks" | null;
+  category: string | null;
+  description: string | null;
+  image_url: string | null;
+  sort_order: number | null;
+  is_available: boolean | null;
+  hidden: boolean | null;
+};
+
+type ItemOut = {
+  id: number;
+  sku: string;
+  name: string;
+  price: number;
+  stream: "food" | "drinks";
+  category: string | null;
+  description: string | null;
+  image_url: string | null;
+  sort_order: number;
+  groups?: ModifierGroupOut[];
+};
+
+type LinkRow = { item_id: number; group_id: number; sort_order: number | null };
+
+type GroupRow = {
+  id: number;
+  name: string;
+  selection: string | null; // "single" | "multiple" | null
+  min_select: number | null;
+  max_select: number | null;
+  required: boolean | null;
+  sort_order: number | null;
+};
+
+type OptionRow = {
+  id: number;
+  group_id: number;
+  name: string;
+  price_delta: number | null;
+  is_default: boolean | null;
+  is_available: boolean | null;
+  sort_order: number | null;
+};
+
+type ModifierOptionOut = {
+  id: number;
+  group_id: number;
+  name: string;
+  price_delta: number;
+  is_default: boolean;
+  is_available: true;
+  sort_order: number;
+};
+
+type ModifierGroupOut = {
+  id: number;
+  name: string;
+  selection: "single" | "multiple";
+  required: boolean;
+  min_select: number;
+  max_select: number;
+  sort_order: number;
+  options: ModifierOptionOut[];
+};
+
+/* ------------------------------ Handler ------------------------------ */
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   try {
-    const stream = String(req.query.stream ?? "all").toLowerCase(); // food|drinks|all
+    if (req.method !== "GET") {
+      res.setHeader("Allow", "GET");
+      return res.status(405).json({ ok: false, error: "Method Not Allowed" });
+    }
 
+    // Normalize query params
+    const streamRaw = (getStr(req.query.stream) ?? "all").toLowerCase();
+    const stream: Stream = streamRaw === "food" || streamRaw === "drinks" ? streamRaw : "all";
+
+    const q = (getStr(req.query.q) ?? "").trim();
+    const includeHidden = getBool(req.query.includeHidden, false);
+
+    // Supabase anon client (read-only public data)
     const supa = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, // read-only
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
       { auth: { persistSession: false } }
     );
 
-    const streamParam = (req.query.stream as string | undefined)?.toLowerCase(); // "food" | "drinks"
-    const q = (req.query.q as string | undefined)?.trim();
-    const includeHidden = req.query.includeHidden === "1";
-
-    // 1) Items (optionally filter by stream/search; hide unavailable unless includeHidden=1)
+    /* ------------------------------- 1) Items ------------------------------- */
     let itemsQ = supa
       .from("menu_items")
-      .select("id, sku, name, price, stream, category, description, image_url, sort_order, is_available, hidden")
+      .select(
+        "id, sku, name, price, stream, category, description, image_url, sort_order, is_available, hidden"
+      )
       .order("sort_order", { ascending: true })
       .order("name", { ascending: true });
 
-    if (streamParam === "food" || streamParam === "drinks") {
-      itemsQ = itemsQ.eq("stream", streamParam);
+    if (stream === "food" || stream === "drinks") {
+      itemsQ = itemsQ.eq("stream", stream);
     }
     if (!includeHidden) {
       itemsQ = itemsQ.eq("hidden", false).eq("is_available", true);
@@ -39,23 +120,26 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     const { data: itemsRaw, error: itemErr } = await itemsQ;
     if (itemErr) throw itemErr;
 
-    const items = (itemsRaw ?? []).map((r) => ({
-      id: Number(r.id),
-      sku: String(r.sku),
-      name: String(r.name),
-      price: Number(r.price ?? 0),
-      stream: r.stream as "food" | "drinks",
-      category: r.category ?? null,
-      description: r.description ?? null,
-      image_url: r.image_url ?? null,
-      sort_order: Number(r.sort_order ?? 0),
-    }));
+    const items: ItemOut[] = (itemsRaw ?? []).map((r: any) => {
+      const it = r as ItemRow;
+      return {
+        id: Number(it.id),
+        sku: String(it.sku),
+        name: String(it.name),
+        price: Number(it.price ?? 0),
+        stream: (it.stream ?? "food") as "food" | "drinks",
+        category: it.category ?? null,
+        description: it.description ?? null,
+        image_url: it.image_url ?? null,
+        sort_order: Number(it.sort_order ?? 0),
+      };
+    });
 
     if (items.length === 0) {
       return res.status(200).json({ ok: true, items: [] });
     }
 
-    // 2) Item -> group links
+    /* ------------------------- 2) Item -> group links ------------------------ */
     const itemIds = items.map((i) => i.id);
     const { data: links, error: linkErr } = await supa
       .from("menu_item_modifier_groups")
@@ -64,12 +148,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       .order("sort_order", { ascending: true });
     if (linkErr) throw linkErr;
 
-    const groupIds = Array.from(new Set((links ?? []).map((l) => Number(l.group_id))));
+    const groupIds = Array.from(new Set((links ?? []).map((l: any) => Number((l as LinkRow).group_id))));
     if (groupIds.length === 0) {
       return res.status(200).json({ ok: true, items: items.map((i) => ({ ...i, groups: [] })) });
     }
 
-    // 3) Groups + options (only include available options)
+    /* ------------------------- 3) Groups + Options (avail) ------------------- */
     const [{ data: groupsRaw, error: gErr }, { data: optsRaw, error: oErr }] = await Promise.all([
       supa
         .from("menu_modifier_groups")
@@ -85,51 +169,57 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     if (gErr) throw gErr;
     if (oErr) throw oErr;
 
-    const groupsById = new Map<number, any>();
-    for (const g of groupsRaw ?? []) {
-      groupsById.set(Number(g.id), {
-        id: Number(g.id),
-        name: String(g.name),
-        selection: g.selection === "multiple" ? "multiple" : "single",
-        required: Boolean(g.required),
-        min_select: Number(g.min_select ?? 0),
-        max_select: Number(g.max_select ?? 1),
-        sort_order: Number(g.sort_order ?? 0),
-        options: [] as any[],
+    const groupsById = new Map<number, ModifierGroupOut>();
+
+    for (const g of (groupsRaw ?? []) as any[]) {
+      const gr = g as GroupRow;
+      groupsById.set(Number(gr.id), {
+        id: Number(gr.id),
+        name: String(gr.name),
+        selection: gr.selection === "multiple" ? "multiple" : "single",
+        required: Boolean(gr.required),
+        min_select: Number(gr.min_select ?? 0),
+        max_select: Number(gr.max_select ?? 1),
+        sort_order: Number(gr.sort_order ?? 0),
+        options: [],
       });
     }
-    for (const o of optsRaw ?? []) {
-      if (o.is_available === false) continue;
-      const gid = Number(o.group_id);
+
+    for (const o of (optsRaw ?? []) as any[]) {
+      const op = o as OptionRow;
+      if (op.is_available === false) continue;
+      const gid = Number(op.group_id);
       const bucket = groupsById.get(gid);
       if (!bucket) continue;
       bucket.options.push({
-        id: Number(o.id),
+        id: Number(op.id),
         group_id: gid,
-        name: String(o.name),
-        price_delta: Number(o.price_delta ?? 0),
-        is_default: Boolean(o.is_default),
+        name: String(op.name),
+        price_delta: Number(op.price_delta ?? 0),
+        is_default: Boolean(op.is_default),
         is_available: true,
-        sort_order: Number(o.sort_order ?? 0),
+        sort_order: Number(op.sort_order ?? 0),
       });
     }
 
-    // 4) Attach groups to items in link order
+    /* ------------------- 4) Attach groups to items by link order -------------- */
     const linksByItem = new Map<number, { group_id: number; sort_order: number }[]>();
-    for (const l of links ?? []) {
-      const arr = linksByItem.get(l.item_id) ?? [];
-      arr.push({ group_id: Number(l.group_id), sort_order: Number(l.sort_order ?? 0) });
-      linksByItem.set(Number(l.item_id), arr);
+    for (const l of (links ?? []) as any[]) {
+      const lr = l as LinkRow;
+      const arr = linksByItem.get(Number(lr.item_id)) ?? [];
+      arr.push({ group_id: Number(lr.group_id), sort_order: Number(lr.sort_order ?? 0) });
+      linksByItem.set(Number(lr.item_id), arr);
     }
 
-    const payload = items.map((i) => {
+    const payload: ItemOut[] = items.map((i) => {
       const arr = (linksByItem.get(i.id) ?? []).sort((a, b) => a.sort_order - b.sort_order);
-      const groups = arr.map(({ group_id }) => groupsById.get(group_id)).filter(Boolean);
+      const groups = arr.map(({ group_id }) => groupsById.get(group_id)).filter(Boolean) as ModifierGroupOut[];
       return { ...i, groups };
     });
 
     return res.status(200).json({ ok: true, items: payload });
-  } catch (e: any) {
-    return res.status(500).json({ ok: false, error: e?.message || "Unexpected error" });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unexpected error";
+    return res.status(500).json({ ok: false, error: msg });
   }
 }
