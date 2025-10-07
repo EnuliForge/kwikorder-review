@@ -1,7 +1,7 @@
 // src/app/admin/reports/total/page.tsx
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
 type Stream = "food" | "drinks" | null;
@@ -50,13 +50,11 @@ function fmt(s?: string | null) {
 }
 function csvEscape(v: any) {
   const s = v == null ? "" : String(v);
-  // wrap if contains comma/quote/newline; escape quotes
   const needsWrap = /[",\n]/.test(s);
   const escaped = s.replace(/"/g, '""');
-  return needsWrap ? `"${escaped}"` : escaped;
+  return needsWrap ? `"${escaped}"` : s;
 }
 function downloadCsv(filename: string, csv: string) {
-  // Add BOM for Excel friendliness
   const blob = new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -68,10 +66,10 @@ function downloadCsv(filename: string, csv: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function Page() {
+/** The real page content (uses useSearchParams) */
+function PageInner() {
   const sp = useSearchParams();
-const rawDays = sp?.get("days");               // guard for nullable typing
-const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
+  const days = Math.max(1, Math.min(30, Number(sp?.get("days") ?? 1)));
 
   const [data, setData] = useState<VenueReportJSON | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -82,9 +80,7 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
     [days]
   );
 
-  useEffect(() => {
-    document.title = title;
-  }, [title]);
+  useEffect(() => { document.title = title; }, [title]);
 
   useEffect(() => {
     let alive = true;
@@ -114,7 +110,6 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
     return () => { alive = false; };
   }, [days]);
 
-  // ------- CSV builders -------
   function buildItemsCsv(d: VenueReportJSON) {
     const headers = [
       "range_from","range_to","days",
@@ -139,30 +134,26 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
           ].map(csvEscape).join(",");
           rows.push(line);
         }
-        // include rows for tickets that had no lines to preserve visibility
         if (t.lines.length === 0) {
-          const line = [
+          rows.push([
             d.range.from, d.range.to, d.range.days,
             o.order_code, o.table_number ?? "",
             o.created_at, o.closed_at ?? "",
             o.resolution_required ? "yes" : "no",
             t.stream ?? "", t.status, t.created_at ?? "", t.ready_at ?? "", t.delivered_at ?? "",
             "", "", "", "", issueCount
-          ].map(csvEscape).join(",");
-          rows.push(line);
+          ].map(csvEscape).join(","));
         }
       }
-      // orders with no tickets at all
       if (o.tickets.length === 0) {
-        const line = [
+        rows.push([
           d.range.from, d.range.to, d.range.days,
           o.order_code, o.table_number ?? "",
           o.created_at, o.closed_at ?? "",
           o.resolution_required ? "yes" : "no",
           "", "", "", "", "",
           "", "", "", "", issueCount
-        ].map(csvEscape).join(",");
-        rows.push(line);
+        ].map(csvEscape).join(","));
       }
     }
     return rows.join("\r\n");
@@ -189,7 +180,7 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
   function handleExportByTableCsv() {
     if (!data?.ok) return;
     const csv = buildByTableCsv(data);
-    const fname = `venue-total-by-table_${data.range.from.slice(0,10)}_${data.range.to.slice(0,10)} .csv`;
+    const fname = `venue-total-by-table_${data.range.from.slice(0,10)}_${data.range.to.slice(0,10)}.csv`;
     downloadCsv(fname, csv);
   }
 
@@ -206,24 +197,13 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
           <a href="/admin" className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50">
             Back to admin
           </a>
-          <button
-            onClick={handleExportByTableCsv}
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-            title="Export per-table summary CSV"
-          >
+          <button onClick={handleExportByTableCsv} className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50" title="Export per-table summary CSV">
             Export tables CSV
           </button>
-          <button
-            onClick={handleExportItemsCsv}
-            className="rounded-lg border bg-red-600 text-white px-3 py-2 text-sm hover:opacity-90"
-            title="Export item-level CSV"
-          >
+          <button onClick={handleExportItemsCsv} className="rounded-lg border bg-red-600 text-white px-3 py-2 text-sm hover:opacity-90" title="Export item-level CSV">
             Export items CSV
           </button>
-          <button
-            onClick={() => window.print()}
-            className="rounded-lg border bg-black text-white px-3 py-2 text-sm hover:opacity-90"
-          >
+          <button onClick={() => window.print()} className="rounded-lg border bg-black text-white px-3 py-2 text-sm hover:opacity-90">
             Print
           </button>
         </div>
@@ -242,15 +222,9 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
               From <strong>{fmt(data.range.from)}</strong> to <strong>{fmt(data.range.to)}</strong>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-3 text-sm">
-              <div className="rounded-lg border p-3">
-                Orders: <span className="font-semibold">{data.totals.orders}</span>
-              </div>
-              <div className="rounded-lg border p-3">
-                Items: <span className="font-semibold">{data.totals.items}</span>
-              </div>
-              <div className="rounded-lg border p-3">
-                Revenue: <span className="font-semibold">{money(data.totals.revenue)}</span>
-              </div>
+              <div className="rounded-lg border p-3">Orders: <span className="font-semibold">{data.totals.orders}</span></div>
+              <div className="rounded-lg border p-3">Items: <span className="font-semibold">{data.totals.items}</span></div>
+              <div className="rounded-lg border p-3">Revenue: <span className="font-semibold">{money(data.totals.revenue)}</span></div>
             </div>
           </section>
 
@@ -292,9 +266,7 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
                     Order <span className="font-mono">{o.order_code}</span>
                     {o.table_number ? <span className="ml-2 text-gray-600">• Table {o.table_number}</span> : null}
                   </div>
-                  <div className="text-sm">
-                    Total: <span className="font-semibold">{money(o.totals.revenue)}</span>
-                  </div>
+                  <div className="text-sm">Total: <span className="font-semibold">{money(o.totals.revenue)}</span></div>
                 </div>
 
                 <div className="mt-1 text-sm text-gray-600">
@@ -359,5 +331,14 @@ const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
         </>
       )}
     </main>
+  );
+}
+
+/** Page export wrapped in Suspense so useSearchParams is legal under Next 15 */
+export default function Page() {
+  return (
+    <Suspense fallback={<div className="rounded-xl border p-4 bg-white">Loading…</div>}>
+      <PageInner />
+    </Suspense>
   );
 }
