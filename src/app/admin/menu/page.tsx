@@ -3,12 +3,11 @@
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import CartProvider, { useCart } from "../../../components/CartProvider";
-import MenuItemCard from "../../../components/MenuItemCard";
-import BottomCartDrawer from "../../../components/BottomCartDrawer";
-import SearchBar from "../../../components/SearchBar";
-import type { MenuItem } from "../../../lib/types";
-
+import CartProvider, { useCart } from "@/components/CartProvider";
+import MenuItemCard from "@/components/MenuItemCard";
+import BottomCartDrawer from "@/components/BottomCartDrawer";
+import SearchBar from "@/components/SearchBar";
+import type { MenuItem } from "@/lib/types";
 
 type Section = { key: string; title: string; items: MenuItem[] };
 
@@ -253,11 +252,11 @@ useEffect(() => {
 /** Default export — wrap in Suspense so useSearchParams is allowed */
 export default function MenuPage() {
   return (
-    <Suspense fallback={<div className="mx-auto max-w-6xl px-4 py-10">Loading…</div>}>
-      <CartProvider>
+    <CartProvider>
+      <Suspense fallback={<main className="mx-auto max-w-6xl px-4 pb-40">Loading…</main>}>
         <MenuInner />
-        <BottomCartDrawer />
-      </CartProvider>
-    </Suspense>
+      </Suspense>
+      <BottomCartDrawer />
+    </CartProvider>
   );
 }
