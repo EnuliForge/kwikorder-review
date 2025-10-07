@@ -262,7 +262,10 @@ function Card({
 }
 
 export default function OrderStatusSinglePage() {
-  const { order_code } = useParams<{ order_code: string }>();
+  // ⬇️ make useParams null-safe
+  const params = useParams<{ order_code: string }>();
+  const order_code = (params?.order_code ?? "").trim();
+
   const router = useRouter();
 
   const [tickets, setTickets] = useState<Ticket[]>([]);
