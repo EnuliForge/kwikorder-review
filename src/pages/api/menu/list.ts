@@ -1,7 +1,21 @@
 // src/pages/api/menu/list.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createClient } from "@supabase/supabase-js"; // anon key for read-only menu
-import { getStr, getBool } from "@/lib/http/params";
+
+/* --------------------------- Local helper funcs --------------------------- */
+function getStr(query: any, key: string, def = ""): string {
+  const raw = query?.[key];
+  const one = Array.isArray(raw) ? raw[0] : raw;
+  return one ? String(one) : def;
+}
+
+function getBool(query: any, key: string, def = false): boolean {
+  const raw = query?.[key];
+  const one = Array.isArray(raw) ? raw[0] : raw;
+  if (one == null) return def;
+  const s = String(one).trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes";
+}
 
 /* ----------------------------- Types ----------------------------- */
 type Stream = "food" | "drinks" | "all";
@@ -38,7 +52,7 @@ type LinkRow = { item_id: number; group_id: number; sort_order: number | null };
 type GroupRow = {
   id: number;
   name: string;
-  selection: string | null; // "single" | "multiple" | null
+  selection: string | null;
   min_select: number | null;
   max_select: number | null;
   required: boolean | null;
@@ -85,13 +99,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     // Normalize query params
-    const streamRaw = (getStr(req.query.stream) ?? "all").toLowerCase();
+    const streamRaw = (getStr(req.query, "stream") ?? "all").toLowerCase();
     const stream: Stream = streamRaw === "food" || streamRaw === "drinks" ? streamRaw : "all";
 
-    const q = (getStr(req.query.q) ?? "").trim();
-    const includeHidden = getBool(req.query.includeHidden, false);
+    const q = (getStr(req.query, "q") ?? "").trim();
+    const includeHidden = getBool(req.query, "includeHidden", false);
 
-    // Supabase anon client (read-only public data)
+    // Supabase anon client (read-only)
     const supa = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -153,7 +167,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       return res.status(200).json({ ok: true, items: items.map((i) => ({ ...i, groups: [] })) });
     }
 
-    /* ------------------------- 3) Groups + Options (avail) ------------------- */
+    /* ------------------------- 3) Groups + Options --------------------------- */
     const [{ data: groupsRaw, error: gErr }, { data: optsRaw, error: oErr }] = await Promise.all([
       supa
         .from("menu_modifier_groups")
@@ -202,7 +216,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    /* ------------------- 4) Attach groups to items by link order -------------- */
+    /* ------------------- 4) Attach groups to items --------------------------- */
     const linksByItem = new Map<number, { group_id: number; sort_order: number }[]>();
     for (const l of (links ?? []) as any[]) {
       const lr = l as LinkRow;
