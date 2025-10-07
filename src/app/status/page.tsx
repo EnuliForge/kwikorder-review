@@ -11,7 +11,7 @@ export default function StatusIndex() {
 
   useEffect(() => {
     // 1) If an order code is present, redirect to the single-order page
-    const rawCode = sp.get("order_code") || sp.get("code");
+    const rawCode = sp?.get("order_code") || sp?.get("code"); // ← null-safe
     if (rawCode && rawCode.trim()) {
       const code = rawCode.trim().toUpperCase();
       router.replace(`/status/${encodeURIComponent(code)}`);
@@ -21,7 +21,7 @@ export default function StatusIndex() {
     // 2) Otherwise try to resolve a table number (URL first, then localStorage)
     let tableNum: number | null = null;
 
-    const fromUrl = sp.get("table") || sp.get("t");
+    const fromUrl = sp?.get("table") || sp?.get("t"); // ← null-safe
     if (fromUrl) {
       const n = parseInt(fromUrl, 10);
       if (Number.isFinite(n) && n > 0) {
