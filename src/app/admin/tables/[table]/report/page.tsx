@@ -59,7 +59,7 @@ function csvEscape(v: any) {
 }
 function toCSV(headers: string[], rows: any[][]) {
   const bom = "\uFEFF";
-  const lines = [headers.map(csvEscape).join(","), ...rows.map(r => r.map(csvEscape).join(","))];
+  const lines = [headers.map(csvEscape).join(","), ...rows.map((r) => r.map(csvEscape).join(","))];
   return bom + lines.join("\r\n");
 }
 function downloadCSV(filename: string, text: string) {
@@ -77,16 +77,22 @@ function downloadCSV(filename: string, text: string) {
 }
 
 export default function TableReportPage() {
-  // ⬇️ was: const { table } = useParams<{ table: string }>();
+  // route params (null-safe)
   const params = useParams<{ table: string }>();
-  const table = (params?.table ?? "").trim();   // null-safe string
+  const table = (params?.table ?? "").trim();
 
   const router = useRouter();
 
-  // ⬇️ was: const sp = useSearchParams(); const days = Math.max(... sp.get("days") ...)
+  // search params (null-safe)
   const sp = useSearchParams();
-  const rawDays = sp?.get("days");              // null-safe
-  const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)))
+  const rawDays = sp?.get("days");
+  const days = Math.max(1, Math.min(30, Number(rawDays ?? 1)));
+
+  // ✅ Add the missing state BEFORE effects that use them
+  const [data, setData] = useState<ReportJSON | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [compact, setCompact] = useState(false);
 
   const title = useMemo(
     () => `Table ${table} — Report (last ${days} day${days > 1 ? "s" : ""})`,
@@ -103,8 +109,8 @@ export default function TableReportPage() {
     async function fetchReport(tbl: string | number, d: number): Promise<ReportJSON> {
       // Keep both endpoints for resilience
       const urls = [
-        `/api/admin/table-report?table=${encodeURIComponent(String(tbl))}&days=${d}`,   // canonical
-        `/api/admin/tables/report?table=${encodeURIComponent(String(tbl))}&days=${d}`,  // legacy fallback
+        `/api/admin/table-report?table=${encodeURIComponent(String(tbl))}&days=${d}`, // canonical
+        `/api/admin/tables/report?table=${encodeURIComponent(String(tbl))}&days=${d}`, // legacy fallback
       ];
       let lastStatus = 0;
       let lastText = "";
@@ -112,7 +118,9 @@ export default function TableReportPage() {
         const r = await fetch(u, { cache: "no-store" });
         lastStatus = r.status;
         if (r.ok) return (await r.json()) as ReportJSON;
-        try { lastText = await r.text(); } catch {}
+        try {
+          lastText = await r.text();
+        } catch {}
       }
       throw new Error(
         `Report endpoint not found (status ${lastStatus})${
@@ -182,7 +190,7 @@ export default function TableReportPage() {
             (Number(L.qty) * Number(L.unit_price)).toFixed(2),
           ]);
         }
-        // If a ticket had no lines, still include a row for clarity
+        // include a row if a ticket had no lines
         if (t.lines.length === 0) {
           itemRows.push([
             data.table,
@@ -287,10 +295,7 @@ export default function TableReportPage() {
           </button>
 
           {/* Actions */}
-          <a
-            href="/admin"
-            className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50"
-          >
+          <a href="/admin" className="rounded-lg border px-3 py-2 text-sm hover:bg-gray-50">
             Back to admin
           </a>
           <button
@@ -320,8 +325,7 @@ export default function TableReportPage() {
           {/* Summary */}
           <section className="summary rounded-xl border p-4 bg-white">
             <div className="text-sm text-gray-600">
-              From <strong>{fmt(data.range.from)}</strong> to{" "}
-              <strong>{fmt(data.range.to)}</strong>
+              From <strong>{fmt(data.range.from)}</strong> to <strong>{fmt(data.range.to)}</strong>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-3 text-sm">
               <div className="rounded-lg border p-3">
@@ -374,13 +378,10 @@ export default function TableReportPage() {
                       <div key={t.id} className="rounded-lg border p-3">
                         <div className="flex items-center justify-between">
                           <div className="font-medium capitalize">{t.stream ?? "—"}</div>
-                          <div className="text-xs rounded-full border px-2 py-0.5">
-                            {t.status}
-                          </div>
+                          <div className="text-xs rounded-full border px-2 py-0.5">{t.status}</div>
                         </div>
                         <div className="mt-1 text-xs text-gray-600">
-                          Received: {fmt(t.created_at)} • Ready: {fmt(t.ready_at)} • Delivered:{" "}
-                          {fmt(t.delivered_at)}
+                          Received: {fmt(t.created_at)} • Ready: {fmt(t.ready_at)} • Delivered: {fmt(t.delivered_at)}
                         </div>
                         <ul className="mt-2 text-sm">
                           {lines.map((L, i) => (
@@ -388,16 +389,10 @@ export default function TableReportPage() {
                               <span className="truncate">
                                 {L.name} × {L.qty}
                               </span>
-                              <span className="font-medium">
-                                {money(Number(L.qty) * Number(L.unit_price))}
-                              </span>
+                              <span className="font-medium">{money(Number(L.qty) * Number(L.unit_price))}</span>
                             </li>
                           ))}
-                          {hiddenCount > 0 && (
-                            <li className="py-0.5 text-xs text-gray-500">
-                              +{hiddenCount} more…
-                            </li>
-                          )}
+                          {hiddenCount > 0 && <li className="py-0.5 text-xs text-gray-500">+{hiddenCount} more…</li>}
                           {t.lines.length === 0 && <li className="text-gray-500">No items</li>}
                         </ul>
                       </div>
@@ -415,19 +410,14 @@ export default function TableReportPage() {
                         <li key={is.id} className="rounded-lg border px-3 py-2">
                           <div className="flex items-center justify-between">
                             <div>
-                              <span className="capitalize">
-                                {(is.type || "issue").replace("_", " ")}
-                              </span>
+                              <span className="capitalize">{(is.type || "issue").replace("_", " ")}</span>
                               {is.stream ? <span> • {is.stream}</span> : null}
                               {is.description ? <span> — {is.description}</span> : null}
                             </div>
-                            <span className="text-xs rounded-full border px-2 py-0.5">
-                              {is.status}
-                            </span>
+                            <span className="text-xs rounded-full border px-2 py-0.5">{is.status}</span>
                           </div>
                           <div className="text-xs text-gray-600">
-                            Opened: {fmt(is.created_at)}{" "}
-                            {is.resolved_at ? `• Resolved: ${fmt(is.resolved_at)}` : ""}
+                            Opened: {fmt(is.created_at)} {is.resolved_at ? `• Resolved: ${fmt(is.resolved_at)}` : ""}
                           </div>
                         </li>
                       ))}
