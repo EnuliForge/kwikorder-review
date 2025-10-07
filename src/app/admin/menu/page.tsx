@@ -210,11 +210,10 @@ function MenuInner() {
 export default function MenuPage() {
   return (
     <CartProvider>
-      <Suspense fallback={<main className="mx-auto max-w-6xl px-4 pb-40">Loading…</main>}>
-        {/* Everything that might call useSearchParams goes inside Suspense */}
+      <Suspense fallback={<div className="p-4">Loading…</div>}>
         <MenuInner />
-        <BottomCartDrawer />
       </Suspense>
+      <BottomCartDrawer />
     </CartProvider>
   );
 }
