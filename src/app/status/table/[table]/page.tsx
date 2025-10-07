@@ -67,9 +67,12 @@ function Badge({ status }: { status: Ticket["status"] }) {
 }
 
 export default function TableStatusPage() {
-  const { table } = useParams<{ table: string }>();
-  const router = useRouter();
+  const params = useParams<{ table: string }>();
+  const table = (params?.table ?? "").trim();
   const tableNum = Number(table);
+ 
+
+   const router = useRouter();
 
   const [orderCodes, setOrderCodes] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
